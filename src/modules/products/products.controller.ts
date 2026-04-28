@@ -47,6 +47,7 @@ export class ProductsController {
     @Query('categoryId') categoryId?: string,
     @Query('stockStatus') stockStatus?: 'all' | 'in_stock' | 'out_of_stock',
     @Query('branchId') branchId?: string,
+    @Query('search') search?: string,
   ) {
     return this.productsService.listProducts({
       page: Number(page) || 1,
@@ -54,6 +55,7 @@ export class ProductsController {
       categoryId: categoryId || undefined,
       stockStatus: stockStatus || 'all',
       branchId: branchId || undefined,
+      search: search || undefined,
     });
   }
 

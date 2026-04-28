@@ -23,6 +23,7 @@ type ListProductsParams = {
   categoryId?: string;
   stockStatus?: 'all' | 'in_stock' | 'out_of_stock';
   branchId?: string;
+  search?: string;
 };
 
 type BranchConfigInput = { branchId: string; isActive: boolean; stock?: number };
@@ -142,6 +143,12 @@ export class ProductsService {
          )`,
       );
       whereParams.push(params.branchId);
+      whereIndex += 1;
+    }
+
+    if (params.search) {
+      whereParts.push(`(p.name ILIKE $${whereIndex} OR c.name ILIKE $${whereIndex})`);
+      whereParams.push(`%${params.search}%`);
       whereIndex += 1;
     }
 
