@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { json, urlencoded } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { PgService } from './database/pg.service';
@@ -10,6 +11,8 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.setGlobalPrefix('api');
   app.enableCors();
+  app.use(json({ limit: '5mb' }));
+  app.use(urlencoded({ extended: true, limit: '5mb' }));
   app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads' });
 
   const db = app.get(PgService);
