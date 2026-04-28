@@ -5,23 +5,6 @@ import * as bcrypt from 'bcryptjs';
 type BranchRow = { id: string };
 
 export async function seed(db: PgService) {
-  await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS unit text');
-  await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS weight numeric(12,3)');
-  await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS stock numeric(12,3) DEFAULT 0');
-  await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
-  await db.query('ALTER TABLE categories ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS product_branches (
-      id text PRIMARY KEY,
-      "productId" text NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-      "branchId" text NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
-      "isActive" boolean NOT NULL DEFAULT true,
-      "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      "updatedAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE ("productId", "branchId")
-    )
-  `);
-
   if (process.env.ENABLE_DEV_SEED !== 'true') {
     return;
   }
