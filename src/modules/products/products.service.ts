@@ -45,6 +45,20 @@ export class ProductsService {
     }
 
     const targetBytes = 250 * 1024;
+
+    if (file.buffer.length <= targetBytes) {
+      const thumb = await sharp(file.buffer)
+        .resize(120, 120, { fit: 'cover' })
+        .webp({ quality: 78 })
+        .toBuffer();
+
+      return {
+        imageUrl: `data:${file.mimetype};base64,${file.buffer.toString('base64')}`,
+        imageThumb: `data:image/webp;base64,${thumb.toString('base64')}`,
+        sizeKb: Number((file.buffer.length / 1024).toFixed(1)),
+      };
+    }
+
     const metadata = await sharp(file.buffer, { failOn: 'none' }).metadata();
 
     let width = metadata.width ?? 1600;
