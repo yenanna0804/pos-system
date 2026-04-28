@@ -144,7 +144,7 @@ export class ProductsService {
         SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
                COALESCE(SUM(pb.stock), 0) AS stock,
                p."isActive", p."createdAt",
-               p."imageThumb",
+               COALESCE(p."imageThumb", p."imageUrl") AS "imageThumb",
                c.id AS "categoryId", c.name AS "categoryName",
                COALESCE(
                  STRING_AGG(b.name, ', ' ORDER BY b.name) FILTER (WHERE pb."isActive" = true),
