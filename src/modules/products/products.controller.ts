@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Query,
   Param,
   Patch,
   Post,
@@ -24,6 +25,7 @@ type CreateProductDto = {
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
   imageUrl?: string | null;
+  imageThumb?: string | null;
 };
 
 type CreateCategoryDto = {
@@ -39,8 +41,25 @@ export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Get('products')
-  listProducts() {
-    return this.productsService.listProducts();
+  listProducts(
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('categoryId') categoryId?: string,
+    @Query('stockStatus') stockStatus?: 'all' | 'in_stock' | 'out_of_stock',
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.productsService.listProducts({
+      page: Number(page) || 1,
+      pageSize: Number(pageSize) || 20,
+      categoryId: categoryId || undefined,
+      stockStatus: stockStatus || 'all',
+      branchId: branchId || undefined,
+    });
+  }
+
+  @Get('products/:id')
+  getProductById(@Param('id') id: string) {
+    return this.productsService.getProductById(id);
   }
 
   @Post('products')

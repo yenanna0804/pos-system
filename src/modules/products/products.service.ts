@@ -14,6 +14,15 @@ type CreateProductInput = {
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
   imageUrl?: string | null;
+  imageThumb?: string | null;
+};
+
+type ListProductsParams = {
+  page: number;
+  pageSize: number;
+  categoryId?: string;
+  stockStatus?: 'all' | 'in_stock' | 'out_of_stock';
+  branchId?: string;
 };
 
 type BranchConfigInput = { branchId: string; isActive: boolean; stock?: number };
@@ -36,8 +45,7 @@ export class ProductsService {
     }
 
     const targetBytes = 250 * 1024;
-    const source = sharp(file.buffer, { failOn: 'none' });
-    const metadata = await source.metadata();
+    const metadata = await sharp(file.buffer, { failOn: 'none' }).metadata();
 
     let width = metadata.width ?? 1600;
     let height = metadata.height ?? 1600;
@@ -53,9 +61,16 @@ export class ProductsService {
 
         best = candidate;
         if (candidate.length <= targetBytes) {
+          const thumb = await sharp(candidate)
+            .resize(120, 120, { fit: 'cover' })
+            .webp({ quality: 78 })
+            .toBuffer();
+
           const base64 = candidate.toString('base64');
+          const thumbBase64 = thumb.toString('base64');
           return {
             imageUrl: `data:image/webp;base64,${base64}`,
+            imageThumb: `data:image/webp;base64,${thumbBase64}`,
             sizeKb: Number((candidate.length / 1024).toFixed(1)),
           };
         }
@@ -73,21 +88,125 @@ export class ProductsService {
       throw new BadRequestException('Không thể nén ảnh xuống dưới 250KB. Vui lòng chọn ảnh nhỏ hơn.');
     }
 
+    const thumb = await sharp(best)
+      .resize(120, 120, { fit: 'cover' })
+      .webp({ quality: 78 })
+      .toBuffer();
+
     const base64 = best.toString('base64');
-    return { imageUrl: `data:image/webp;base64,${base64}`, sizeKb: Number((best.length / 1024).toFixed(1)) };
+    const thumbBase64 = thumb.toString('base64');
+    return {
+      imageUrl: `data:image/webp;base64,${base64}`,
+      imageThumb: `data:image/webp;base64,${thumbBase64}`,
+      sizeKb: Number((best.length / 1024).toFixed(1)),
+    };
   }
 
-  async listProducts() {
-    return this.db.query(
+  async listProducts(params: ListProductsParams) {
+    const page = Math.max(1, Number(params.page) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(params.pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    const whereParts: string[] = ['p."deletedAt" IS NULL'];
+    const whereParams: unknown[] = [];
+    let whereIndex = 1;
+
+    if (params.categoryId) {
+      whereParts.push(`p."categoryId" = $${whereIndex}`);
+      whereParams.push(params.categoryId);
+      whereIndex += 1;
+    }
+
+    if (params.branchId) {
+      whereParts.push(
+        `EXISTS (
+           SELECT 1
+           FROM product_branches pbx
+           WHERE pbx."productId" = p.id
+             AND pbx."branchId" = $${whereIndex}
+             AND pbx."isActive" = true
+         )`,
+      );
+      whereParams.push(params.branchId);
+      whereIndex += 1;
+    }
+
+    const whereSql = whereParts.join(' AND ');
+    const stockSql =
+      params.stockStatus === 'in_stock'
+        ? 'stock > 0'
+        : params.stockStatus === 'out_of_stock'
+          ? 'stock <= 0'
+          : '1=1';
+
+    const baseCte = `
+      WITH product_rows AS (
+        SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
+               COALESCE(SUM(pb.stock), 0) AS stock,
+               p."isActive", p."createdAt",
+               p."imageThumb",
+               c.id AS "categoryId", c.name AS "categoryName",
+               COALESCE(
+                 STRING_AGG(b.name, ', ' ORDER BY b.name) FILTER (WHERE pb."isActive" = true),
+                 ''
+               ) AS "branchNames",
+               COALESCE(
+                 JSON_AGG(
+                   JSON_BUILD_OBJECT(
+                     'branchId', pb."branchId",
+                     'branchName', b.name,
+                     'isActive', pb."isActive",
+                     'stock', pb.stock
+                   )
+                 ) FILTER (WHERE pb.id IS NOT NULL),
+                 '[]'::json
+               ) AS "branchConfigs"
+        FROM products p
+        LEFT JOIN categories c ON c.id = p."categoryId" AND c."deletedAt" IS NULL
+        LEFT JOIN product_branches pb ON pb."productId" = p.id
+        LEFT JOIN branches b ON b.id = pb."branchId"
+        WHERE ${whereSql}
+        GROUP BY p.id, c.id
+      )
+    `;
+
+    const countRows = await this.db.query<{ total: number }>(
+      `${baseCte}
+       SELECT COUNT(*)::int AS total
+       FROM product_rows
+       WHERE ${stockSql}`,
+      whereParams,
+    );
+    const total = Number(countRows[0]?.total || 0);
+
+    const items = await this.db.query(
+      `${baseCte}
+       SELECT *
+       FROM product_rows
+       WHERE ${stockSql}
+       ORDER BY "createdAt" DESC
+       LIMIT $${whereIndex} OFFSET $${whereIndex + 1}`,
+      [...whereParams, pageSize, offset],
+    );
+
+    return {
+      items,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
+  }
+
+  async getProductById(id: string) {
+    const rows = await this.db.query(
       `SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
               COALESCE(SUM(pb.stock), 0) AS stock,
               p."isActive", p."createdAt",
-              p."imageUrl",
+              p."imageUrl", p."imageThumb",
               c.id AS "categoryId", c.name AS "categoryName",
-              COALESCE(
-                STRING_AGG(b.name, ', ' ORDER BY b.name) FILTER (WHERE pb."isActive" = true),
-                ''
-              ) AS "branchNames",
               COALESCE(
                 JSON_AGG(
                   JSON_BUILD_OBJECT(
@@ -103,10 +222,17 @@ export class ProductsService {
        LEFT JOIN categories c ON c.id = p."categoryId" AND c."deletedAt" IS NULL
        LEFT JOIN product_branches pb ON pb."productId" = p.id
        LEFT JOIN branches b ON b.id = pb."branchId"
-       WHERE p."deletedAt" IS NULL
+       WHERE p.id = $1 AND p."deletedAt" IS NULL
        GROUP BY p.id, c.id
-       ORDER BY p."createdAt" DESC`,
+       LIMIT 1`,
+      [id],
     );
+
+    if (!rows[0]) {
+      throw new NotFoundException('Hàng hóa không tồn tại');
+    }
+
+    return rows[0];
   }
 
   private async normalizeBranchConfigs(branchConfigs?: BranchConfigInput[]) {
@@ -196,9 +322,9 @@ export class ProductsService {
     const sku = input.sku?.trim() || `HH${Date.now()}`;
     const rows = await this.db.query(
       `INSERT INTO products
-       (id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "updatedAt", "imageUrl")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), $11)
-       RETURNING id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl"`,
+       (id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "updatedAt", "imageUrl", "imageThumb")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), $11, $12)
+       RETURNING id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"`,
       [
         id,
         input.name.trim(),
@@ -211,6 +337,7 @@ export class ProductsService {
         totalStock,
         input.isActive ?? true,
         input.imageUrl ?? null,
+        input.imageThumb ?? null,
       ],
     );
 
@@ -252,8 +379,8 @@ export class ProductsService {
     await this.db.query(
       `UPDATE products
        SET name = $1, sku = $2, price = $3, "costPrice" = $4, "categoryId" = $5,
-           unit = $6, weight = $7, stock = $8, "isActive" = $9, "updatedAt" = NOW(), "imageUrl" = $10
-       WHERE id = $11`,
+           unit = $6, weight = $7, stock = $8, "isActive" = $9, "updatedAt" = NOW(), "imageUrl" = $10, "imageThumb" = $11
+       WHERE id = $12`,
       [
         input.name.trim(),
         input.sku?.trim() || `HH${Date.now()}`,
@@ -265,6 +392,7 @@ export class ProductsService {
         totalStock,
         input.isActive ?? true,
         input.imageUrl ?? null,
+        input.imageThumb ?? null,
         id,
       ],
     );
@@ -279,7 +407,7 @@ export class ProductsService {
     }
 
     const rows = await this.db.query(
-      `SELECT id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl"
+      `SELECT id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"
        FROM products
        WHERE id = $1
        LIMIT 1`,
