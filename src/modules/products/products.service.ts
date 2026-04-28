@@ -2,7 +2,6 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { randomUUID } from 'crypto';
 import sharp from 'sharp';
 import { PgService } from '../../database/pg.service';
-import { MinioService } from './minio.service';
 
 type CreateProductInput = {
   sku?: string;
@@ -12,13 +11,12 @@ type CreateProductInput = {
   weight?: number;
   costPrice?: number;
   price: number;
-  stock?: number;
   isActive?: boolean;
-  branchConfigs?: { branchId: string; isActive: boolean }[];
+  branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
   imageUrl?: string | null;
 };
 
-type BranchConfigInput = { branchId: string; isActive: boolean };
+type BranchConfigInput = { branchId: string; isActive: boolean; stock?: number };
 const SKU_REGEX = /^[A-Za-z0-9_-]{3,50}$/;
 const UNIT_REGEX = /^[\p{L}\p{N}\s./-]{1,30}$/u;
 const CATEGORY_NAME_REGEX = /^[\p{L}\p{N}\s&()./-]{2,100}$/u;
@@ -29,10 +27,7 @@ type UpdateCategoryInput = {
 
 @Injectable()
 export class ProductsService {
-  constructor(
-    private db: PgService,
-    private minioService: MinioService,
-  ) {}
+  constructor(private db: PgService) {}
 
   async processAndSaveImage(file: Express.Multer.File) {
     const acceptedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
@@ -40,22 +35,53 @@ export class ProductsService {
       throw new BadRequestException('Ảnh phải là định dạng JPG, PNG hoặc WEBP');
     }
 
-    const processed = await sharp(file.buffer)
-      .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: 80 })
-      .toBuffer();
+    const targetBytes = 250 * 1024;
+    const source = sharp(file.buffer, { failOn: 'none' });
+    const metadata = await source.metadata();
 
-    try {
-      const result = await this.minioService.uploadProductImage(processed, 'image/webp');
-      return { imageUrl: result.imageUrl };
-    } catch {
-      throw new BadRequestException('Upload ảnh thất bại. Vui lòng kiểm tra cấu hình MinIO');
+    let width = metadata.width ?? 1600;
+    let height = metadata.height ?? 1600;
+
+    let best: Buffer | null = null;
+
+    for (let pass = 0; pass < 8; pass++) {
+      for (let quality = 92; quality >= 60; quality -= 4) {
+        const candidate = await sharp(file.buffer, { failOn: 'none' })
+          .resize(width, height, { fit: 'inside', withoutEnlargement: true })
+          .webp({ quality })
+          .toBuffer();
+
+        best = candidate;
+        if (candidate.length <= targetBytes) {
+          const base64 = candidate.toString('base64');
+          return {
+            imageUrl: `data:image/webp;base64,${base64}`,
+            sizeKb: Number((candidate.length / 1024).toFixed(1)),
+          };
+        }
+      }
+
+      width = Math.max(320, Math.floor(width * 0.85));
+      height = Math.max(320, Math.floor(height * 0.85));
     }
+
+    if (!best) {
+      throw new BadRequestException('Không thể xử lý ảnh');
+    }
+
+    if (best.length > targetBytes) {
+      throw new BadRequestException('Không thể nén ảnh xuống dưới 250KB. Vui lòng chọn ảnh nhỏ hơn.');
+    }
+
+    const base64 = best.toString('base64');
+    return { imageUrl: `data:image/webp;base64,${base64}`, sizeKb: Number((best.length / 1024).toFixed(1)) };
   }
 
   async listProducts() {
     return this.db.query(
-      `SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight, p.stock, p."isActive", p."createdAt",
+      `SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
+              COALESCE(SUM(pb.stock), 0) AS stock,
+              p."isActive", p."createdAt",
               p."imageUrl",
               c.id AS "categoryId", c.name AS "categoryName",
               COALESCE(
@@ -67,7 +93,8 @@ export class ProductsService {
                   JSON_BUILD_OBJECT(
                     'branchId', pb."branchId",
                     'branchName', b.name,
-                    'isActive', pb."isActive"
+                    'isActive', pb."isActive",
+                    'stock', pb.stock
                   )
                 ) FILTER (WHERE pb.id IS NOT NULL),
                 '[]'::json
@@ -103,7 +130,11 @@ export class ProductsService {
 
     const uniqueBranchConfigs = branchIds.map((branchId) => {
       const matched = branchConfigs.find((item) => item.branchId === branchId);
-      return { branchId, isActive: matched?.isActive ?? true };
+      const stock = Number(matched?.stock ?? 0);
+      if (!Number.isFinite(stock) || stock < 0) {
+        throw new BadRequestException('Tồn kho theo chi nhánh không hợp lệ');
+      }
+      return { branchId, isActive: matched?.isActive ?? true, stock };
     });
 
     if (!uniqueBranchConfigs.some((item) => item.isActive)) {
@@ -134,11 +165,6 @@ export class ProductsService {
       throw new BadRequestException('Trọng lượng không hợp lệ');
     }
 
-    const stock = Number(input.stock ?? 0);
-    if (!Number.isFinite(stock) || stock < 0) {
-      throw new BadRequestException('Tồn kho không hợp lệ');
-    }
-
     const costPrice = Number(input.costPrice ?? 0);
     if (!Number.isFinite(costPrice) || costPrice < 0) {
       throw new BadRequestException('Giá vốn không hợp lệ');
@@ -164,6 +190,7 @@ export class ProductsService {
     }
 
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs);
+    const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
 
     const id = randomUUID();
     const sku = input.sku?.trim() || `HH${Date.now()}`;
@@ -181,7 +208,7 @@ export class ProductsService {
         input.categoryId || null,
         input.unit?.trim() || null,
         input.weight != null ? Number(input.weight) : null,
-        input.stock != null ? Number(input.stock) : 0,
+        totalStock,
         input.isActive ?? true,
         input.imageUrl ?? null,
       ],
@@ -189,9 +216,9 @@ export class ProductsService {
 
     for (const branchConfig of uniqueBranchConfigs) {
       await this.db.query(
-        `INSERT INTO product_branches (id, "productId", "branchId", "isActive", "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-        [randomUUID(), id, branchConfig.branchId, branchConfig.isActive],
+        `INSERT INTO product_branches (id, "productId", "branchId", "isActive", stock, "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+        [randomUUID(), id, branchConfig.branchId, branchConfig.isActive, branchConfig.stock],
       );
     }
 
@@ -220,6 +247,7 @@ export class ProductsService {
     }
 
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs);
+    const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
 
     await this.db.query(
       `UPDATE products
@@ -234,7 +262,7 @@ export class ProductsService {
         input.categoryId || null,
         input.unit?.trim() || null,
         input.weight != null ? Number(input.weight) : null,
-        input.stock != null ? Number(input.stock) : 0,
+        totalStock,
         input.isActive ?? true,
         input.imageUrl ?? null,
         id,
@@ -244,9 +272,9 @@ export class ProductsService {
     await this.db.query('DELETE FROM product_branches WHERE "productId" = $1', [id]);
     for (const branchConfig of uniqueBranchConfigs) {
       await this.db.query(
-        `INSERT INTO product_branches (id, "productId", "branchId", "isActive", "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-        [randomUUID(), id, branchConfig.branchId, branchConfig.isActive],
+        `INSERT INTO product_branches (id, "productId", "branchId", "isActive", stock, "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+        [randomUUID(), id, branchConfig.branchId, branchConfig.isActive, branchConfig.stock],
       );
     }
 
@@ -257,12 +285,6 @@ export class ProductsService {
        LIMIT 1`,
       [id],
     );
-
-    const oldImageUrl = existed[0].imageUrl;
-    const newImageUrl = input.imageUrl ?? null;
-    if (oldImageUrl && oldImageUrl !== newImageUrl) {
-      await this.minioService.deleteProductImageByUrl(oldImageUrl);
-    }
 
     return rows[0];
   }
@@ -286,18 +308,6 @@ export class ProductsService {
 
     await this.db.query('UPDATE products SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1', [id]);
 
-    if (existed[0].imageUrl) {
-      await this.minioService.deleteProductImageByUrl(existed[0].imageUrl);
-    }
-
-    return { success: true };
-  }
-
-  async deleteImage(imageUrl: string) {
-    if (!imageUrl) {
-      throw new BadRequestException('Thiếu imageUrl');
-    }
-    await this.minioService.deleteProductImageByUrl(imageUrl);
     return { success: true };
   }
 

@@ -21,9 +21,8 @@ type CreateProductDto = {
   weight?: number;
   costPrice?: number;
   price: number;
-  stock?: number;
   isActive?: boolean;
-  branchConfigs?: { branchId: string; isActive: boolean }[];
+  branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
   imageUrl?: string | null;
 };
 
@@ -33,10 +32,6 @@ type CreateCategoryDto = {
 
 type UpdateCategoryDto = {
   name: string;
-};
-
-type DeleteImageDto = {
-  imageUrl: string;
 };
 
 @Controller()
@@ -74,11 +69,6 @@ export class ProductsController {
       throw new BadRequestException('Vui lòng chọn hình ảnh');
     }
     return this.productsService.processAndSaveImage(file);
-  }
-
-  @Post('products/delete-image')
-  deleteImage(@Body() dto: DeleteImageDto) {
-    return this.productsService.deleteImage(dto.imageUrl);
   }
 
   @Get('categories')
