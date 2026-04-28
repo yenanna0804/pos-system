@@ -11,6 +11,54 @@ export async function seed(db: PgService) {
   await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
   await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS "imageThumb" text');
   await db.query('ALTER TABLE categories ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
+  await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "areaId" text');
+  await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "roomId" text');
+  await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS areas (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      "branchId" text REFERENCES branches(id) ON DELETE SET NULL,
+      "deletedAt" timestamp(3),
+      "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS rooms (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      "areaId" text NOT NULL REFERENCES areas(id) ON DELETE CASCADE,
+      "branchId" text REFERENCES branches(id) ON DELETE SET NULL,
+      "deletedAt" timestamp(3),
+      "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tables_areaId_fkey') THEN
+        ALTER TABLE tables
+          ADD CONSTRAINT "tables_areaId_fkey"
+          FOREIGN KEY ("areaId") REFERENCES areas(id) ON DELETE SET NULL ON UPDATE CASCADE;
+      END IF;
+    END $$;
+  `);
+
+  await db.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tables_roomId_fkey') THEN
+        ALTER TABLE tables
+          ADD CONSTRAINT "tables_roomId_fkey"
+          FOREIGN KEY ("roomId") REFERENCES rooms(id) ON DELETE SET NULL ON UPDATE CASCADE;
+      END IF;
+    END $$;
+  `);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS product_branches (
