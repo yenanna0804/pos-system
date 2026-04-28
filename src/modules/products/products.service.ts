@@ -6,6 +6,8 @@ import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
 
 type CreateProductInput = {
+  type?: 'SINGLE' | 'COMBO';
+  autoPrice?: boolean;
   sku?: string;
   name: string;
   categoryId?: string | null;
@@ -15,6 +17,7 @@ type CreateProductInput = {
   price: number;
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
+  comboItems?: { itemProductId: string; quantity: number }[];
   imageUrl?: string | null;
   imageThumb?: string | null;
 };
@@ -22,6 +25,7 @@ type CreateProductInput = {
 type ListProductsParams = {
   page: number;
   pageSize: number;
+  type?: 'SINGLE' | 'COMBO';
   categoryId?: string;
   stockStatus?: 'all' | 'in_stock' | 'out_of_stock';
   branchId?: string;
@@ -29,6 +33,7 @@ type ListProductsParams = {
 };
 
 type BranchConfigInput = { branchId: string; isActive: boolean; stock?: number };
+type ComboItemInput = { itemProductId: string; quantity: number };
 const SKU_REGEX = /^[A-Za-z0-9_-]{3,50}$/;
 const UNIT_REGEX = /^[\p{L}\p{N}\s./-]{1,30}$/u;
 const CATEGORY_NAME_REGEX = /^[\p{L}\p{N}\s&()./-]{2,100}$/u;
@@ -142,6 +147,12 @@ export class ProductsService {
       whereIndex += 1;
     }
 
+    if (params.type) {
+      whereParts.push(`p."type" = $${whereIndex}`);
+      whereParams.push(params.type);
+      whereIndex += 1;
+    }
+
     if (scopedBranchId) {
       whereParts.push(
         `EXISTS (
@@ -180,7 +191,7 @@ export class ProductsService {
 
     const baseCte = `
       WITH product_rows AS (
-        SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
+        SELECT p.id, p.sku, p.name, p."type", p."autoPrice", p.price, p."costPrice", p.unit, p.weight,
                COALESCE(SUM(pb.stock), 0) AS stock,
                p."isActive", p."createdAt",
                COALESCE(p."imageThumb", p."imageUrl") AS "imageThumb",
@@ -259,11 +270,28 @@ export class ProductsService {
   async getProductById(id: string, user: CurrentUser) {
     const scopedBranchId = this.branchPolicy.resolveReadBranchId(user);
     const rows = await this.db.query(
-      `SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
+      `SELECT p.id, p.sku, p.name, p."type", p."autoPrice", p.price, p."costPrice", p.unit, p.weight,
               COALESCE(SUM(pb.stock), 0) AS stock,
               p."isActive", p."createdAt",
               p."imageUrl", p."imageThumb",
               c.id AS "categoryId", c.name AS "categoryName",
+              COALESCE(
+                (
+                  SELECT JSON_AGG(
+                    JSON_BUILD_OBJECT(
+                      'itemProductId', pci."itemProductId",
+                      'quantity', pci.quantity,
+                      'itemName', pi.name,
+                      'itemPrice', pi.price
+                    )
+                    ORDER BY pi.name
+                  )
+                  FROM product_combo_items pci
+                  INNER JOIN products pi ON pi.id = pci."itemProductId"
+                  WHERE pci."comboProductId" = p.id
+                ),
+                '[]'::json
+              ) AS "comboItems",
               COALESCE(
                 JSON_AGG(
                   JSON_BUILD_OBJECT(
@@ -366,6 +394,10 @@ export class ProductsService {
       throw new BadRequestException('Đơn vị tính không đúng định dạng');
     }
 
+    if (input.type && !['SINGLE', 'COMBO'].includes(input.type)) {
+      throw new BadRequestException('Loại hàng hóa không hợp lệ');
+    }
+
     const weight = Number(input.weight ?? 0);
     if (!Number.isFinite(weight) || weight < 0) {
       throw new BadRequestException('Trọng lượng không hợp lệ');
@@ -382,6 +414,60 @@ export class ProductsService {
     }
   }
 
+  private async normalizeComboItems(comboItems: ComboItemInput[] | undefined, user: CurrentUser) {
+    if (!comboItems || comboItems.length === 0) {
+      throw new BadRequestException('Combo phải có ít nhất một hàng hóa thành phần');
+    }
+
+    const uniqueMap = new Map<string, number>();
+    for (const item of comboItems) {
+      if (!item?.itemProductId) continue;
+      const quantity = Math.max(0, Math.floor(Number(item.quantity)));
+      if (quantity <= 0) {
+        throw new BadRequestException('Số lượng thành phần combo không hợp lệ');
+      }
+      uniqueMap.set(item.itemProductId, (uniqueMap.get(item.itemProductId) || 0) + quantity);
+    }
+
+    if (uniqueMap.size === 0) {
+      throw new BadRequestException('Combo phải có ít nhất một hàng hóa thành phần');
+    }
+
+    const itemIds = [...uniqueMap.keys()];
+    const rows = await this.db.query<{ id: string; name: string; price: string; type: string }>(
+      'SELECT id, name, price, "type" FROM products WHERE id = ANY($1::text[]) AND "deletedAt" IS NULL',
+      [itemIds],
+    );
+
+    if (rows.length !== itemIds.length) {
+      throw new BadRequestException('Có hàng hóa thành phần không tồn tại');
+    }
+
+    if (rows.some((item) => item.type === 'COMBO')) {
+      throw new BadRequestException('Tạm thời chưa hỗ trợ thêm combo lồng trong combo');
+    }
+
+    if (!this.branchPolicy.isAdmin(user)) {
+      const branchRows = await this.db.query<{ "productId": string }>(
+        'SELECT "productId" FROM product_branches WHERE "branchId" = $1 AND "isActive" = true AND "productId" = ANY($2::text[])',
+        [user.branchId, itemIds],
+      );
+      if (branchRows.length !== itemIds.length) {
+        throw new BadRequestException('Có hàng hóa thành phần chưa hoạt động tại chi nhánh hiện tại');
+      }
+    }
+
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const normalized = itemIds.map((itemProductId) => ({
+      itemProductId,
+      quantity: uniqueMap.get(itemProductId) || 1,
+      itemPrice: Number(byId.get(itemProductId)?.price || 0),
+    }));
+
+    const autoPrice = normalized.reduce((sum, item) => sum + item.itemPrice * item.quantity, 0);
+    return { normalized, autoPrice };
+  }
+
   async createProduct(input: CreateProductInput, user: CurrentUser) {
     this.validateProductInput(input);
 
@@ -395,21 +481,33 @@ export class ProductsService {
       }
     }
 
+    const productType = input.type === 'COMBO' ? 'COMBO' : 'SINGLE';
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
+    let comboItemsPayload: { itemProductId: string; quantity: number; itemPrice: number }[] = [];
+    let finalPrice = Number(input.price);
+    if (productType === 'COMBO') {
+      const comboPayload = await this.normalizeComboItems(input.comboItems, user);
+      comboItemsPayload = comboPayload.normalized;
+      if (input.autoPrice ?? true) {
+        finalPrice = comboPayload.autoPrice;
+      }
+    }
 
     const id = randomUUID();
     const sku = input.sku?.trim() || `HH${Date.now()}`;
     const rows = await this.db.query(
       `INSERT INTO products
-       (id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "updatedAt", "imageUrl", "imageThumb")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), $11, $12)
-       RETURNING id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"`,
+       (id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "updatedAt", "imageUrl", "imageThumb")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW(), $13, $14)
+       RETURNING id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"`,
       [
         id,
         input.name.trim(),
         sku,
-        Number(input.price),
+        productType,
+        productType === 'COMBO' ? input.autoPrice ?? true : false,
+        finalPrice,
         input.costPrice != null ? Number(input.costPrice) : null,
         input.categoryId || null,
         input.unit?.trim() || null,
@@ -427,6 +525,16 @@ export class ProductsService {
          VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
         [randomUUID(), id, branchConfig.branchId, branchConfig.isActive, branchConfig.stock],
       );
+    }
+
+    if (productType === 'COMBO') {
+      for (const comboItem of comboItemsPayload) {
+        await this.db.query(
+          `INSERT INTO product_combo_items (id, "comboProductId", "itemProductId", quantity, "createdAt", "updatedAt")
+           VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+          [randomUUID(), id, comboItem.itemProductId, comboItem.quantity],
+        );
+      }
     }
 
     return rows[0];
@@ -463,18 +571,33 @@ export class ProductsService {
       }
     }
 
+    const productType = input.type === 'COMBO' ? 'COMBO' : 'SINGLE';
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
+    let comboItemsPayload: { itemProductId: string; quantity: number; itemPrice: number }[] = [];
+    let finalPrice = Number(input.price);
+    if (productType === 'COMBO') {
+      const comboPayload = await this.normalizeComboItems(input.comboItems, user);
+      comboItemsPayload = comboPayload.normalized.filter((item) => item.itemProductId !== id);
+      if (comboItemsPayload.length === 0) {
+        throw new BadRequestException('Combo phải có ít nhất một hàng hóa thành phần');
+      }
+      if (input.autoPrice ?? true) {
+        finalPrice = comboPayload.autoPrice;
+      }
+    }
 
     await this.db.query(
       `UPDATE products
-       SET name = $1, sku = $2, price = $3, "costPrice" = $4, "categoryId" = $5,
-           unit = $6, weight = $7, stock = $8, "isActive" = $9, "updatedAt" = NOW(), "imageUrl" = $10, "imageThumb" = $11
-       WHERE id = $12`,
+       SET name = $1, sku = $2, "type" = $3, "autoPrice" = $4, price = $5, "costPrice" = $6, "categoryId" = $7,
+           unit = $8, weight = $9, stock = $10, "isActive" = $11, "updatedAt" = NOW(), "imageUrl" = $12, "imageThumb" = $13
+       WHERE id = $14`,
       [
         input.name.trim(),
         input.sku?.trim() || `HH${Date.now()}`,
-        Number(input.price),
+        productType,
+        productType === 'COMBO' ? input.autoPrice ?? true : false,
+        finalPrice,
         input.costPrice != null ? Number(input.costPrice) : null,
         input.categoryId || null,
         input.unit?.trim() || null,
@@ -496,8 +619,19 @@ export class ProductsService {
       );
     }
 
+    await this.db.query('DELETE FROM product_combo_items WHERE "comboProductId" = $1', [id]);
+    if (productType === 'COMBO') {
+      for (const comboItem of comboItemsPayload) {
+        await this.db.query(
+          `INSERT INTO product_combo_items (id, "comboProductId", "itemProductId", quantity, "createdAt", "updatedAt")
+           VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+          [randomUUID(), id, comboItem.itemProductId, comboItem.quantity],
+        );
+      }
+    }
+
     const rows = await this.db.query(
-      `SELECT id, name, sku, price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"
+      `SELECT id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"
        FROM products
        WHERE id = $1
        LIMIT 1`,

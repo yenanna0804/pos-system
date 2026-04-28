@@ -19,6 +19,8 @@ import { CurrentUser } from '../../common/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
 
 type CreateProductDto = {
+  type?: 'SINGLE' | 'COMBO';
+  autoPrice?: boolean;
   sku?: string;
   name: string;
   categoryId?: string | null;
@@ -28,6 +30,7 @@ type CreateProductDto = {
   price: number;
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
+  comboItems?: { itemProductId: string; quantity: number }[];
   imageUrl?: string | null;
   imageThumb?: string | null;
 };
@@ -50,6 +53,7 @@ export class ProductsController {
     @CurrentUser() user: CurrentUserType,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
+    @Query('type') type?: 'SINGLE' | 'COMBO',
     @Query('categoryId') categoryId?: string,
     @Query('stockStatus') stockStatus?: 'all' | 'in_stock' | 'out_of_stock',
     @Query('branchId') branchId?: string,
@@ -58,6 +62,7 @@ export class ProductsController {
     return this.productsService.listProducts({
       page: Number(page) || 1,
       pageSize: Number(pageSize) || 20,
+      type: type || undefined,
       categoryId: categoryId || undefined,
       stockStatus: stockStatus || 'all',
       branchId: branchId || undefined,

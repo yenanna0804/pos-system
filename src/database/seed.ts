@@ -10,6 +10,8 @@ export async function seed(db: PgService) {
   await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS stock numeric(12,3) DEFAULT 0');
   await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
   await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS "imageThumb" text');
+  await db.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS \"type\" text DEFAULT 'SINGLE'");
+  await db.query('ALTER TABLE products ADD COLUMN IF NOT EXISTS "autoPrice" boolean DEFAULT true');
   await db.query('ALTER TABLE categories ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
   await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "areaId" text');
   await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "roomId" text');
@@ -73,6 +75,18 @@ export async function seed(db: PgService) {
     )
   `);
   await db.query('ALTER TABLE product_branches ADD COLUMN IF NOT EXISTS stock numeric(12,3) NOT NULL DEFAULT 0');
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS product_combo_items (
+      id text PRIMARY KEY,
+      "comboProductId" text NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      "itemProductId" text NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+      quantity int NOT NULL,
+      "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE ("comboProductId", "itemProductId")
+    )
+  `);
 
   if (process.env.ENABLE_DEV_SEED !== 'true') {
     return;
