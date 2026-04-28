@@ -30,6 +30,10 @@ type BranchConfigInput = { branchId: string; isActive: boolean; stock?: number }
 const SKU_REGEX = /^[A-Za-z0-9_-]{3,50}$/;
 const UNIT_REGEX = /^[\p{L}\p{N}\s./-]{1,30}$/u;
 const CATEGORY_NAME_REGEX = /^[\p{L}\p{N}\s&()./-]{2,100}$/u;
+const VIETNAMESE_DIACRITICS_FROM =
+  'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ';
+const VIETNAMESE_DIACRITICS_TO =
+  'aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiioooooooooooooooooouuuuuuuuuuuyyyyyd';
 
 type UpdateCategoryInput = {
   name: string;
@@ -146,9 +150,17 @@ export class ProductsService {
       whereIndex += 1;
     }
 
-    if (params.search) {
-      whereParts.push(`(p.name ILIKE $${whereIndex} OR c.name ILIKE $${whereIndex})`);
-      whereParams.push(`%${params.search}%`);
+    if (params.search?.trim()) {
+      const searchPattern = `$${whereIndex}`;
+      const normalizedProductName =
+        `translate(lower(coalesce(p.name, '')), '${VIETNAMESE_DIACRITICS_FROM}', '${VIETNAMESE_DIACRITICS_TO}')`;
+      const normalizedCategoryName =
+        `translate(lower(coalesce(c.name, '')), '${VIETNAMESE_DIACRITICS_FROM}', '${VIETNAMESE_DIACRITICS_TO}')`;
+      const normalizedSearch =
+        `translate(lower(${searchPattern}), '${VIETNAMESE_DIACRITICS_FROM}', '${VIETNAMESE_DIACRITICS_TO}')`;
+
+      whereParts.push(`(${normalizedProductName} LIKE ${normalizedSearch} OR ${normalizedCategoryName} LIKE ${normalizedSearch})`);
+      whereParams.push(`%${params.search.trim()}%`);
       whereIndex += 1;
     }
 
