@@ -77,6 +77,32 @@ export class AuthService {
     };
   }
 
+  async getLoginContext(username: string) {
+    if (!username?.trim()) {
+      throw new UnauthorizedException('Tên đăng nhập không đúng');
+    }
+
+    const users = await this.db.query<UserRow>(
+      `SELECT u.id, u.username, u.password, u."fullName", u.role, u."branchId", u."isActive", b.name AS "branchName"
+       FROM users u
+       LEFT JOIN branches b ON b.id = u."branchId"
+       WHERE u.username = $1
+       LIMIT 1`,
+      [username.trim()],
+    );
+    const user = users[0];
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Tên đăng nhập không đúng');
+    }
+
+    return {
+      username: user.username,
+      role: user.role,
+      branchId: user.branchId,
+      branchName: user.branchName,
+    };
+  }
+
   async validateToken(token: string) {
     const [userId] = Buffer.from(token, 'base64').toString().split(':');
     const users = await this.db.query<UserRow>(

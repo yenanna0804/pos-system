@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PgService } from '../../database/pg.service';
+import { BranchPolicyService } from '../../common/branch-policy.service';
+import type { CurrentUser } from '../../common/auth.types';
 
 type AreaInput = { name: string; branchId?: string };
 type RoomInput = { name: string; areaId: string; branchId?: string };
@@ -20,7 +22,10 @@ const VIETNAMESE_DIACRITICS_TO =
 
 @Injectable()
 export class TablesService {
-  constructor(private db: PgService) {}
+  constructor(
+    private db: PgService,
+    private readonly branchPolicy: BranchPolicyService,
+  ) {}
 
   private validateName(name: string, field = 'Tên') {
     const value = name?.trim() || '';
@@ -48,7 +53,8 @@ export class TablesService {
   }
 
 
-  async listAreas(branchId?: string) {
+  async listAreas(user: CurrentUser, branchId?: string) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, branchId);
     const rows = await this.db.query(
       `SELECT a.id, a.name, a."branchId", a."createdAt", a."updatedAt",
               COALESCE((SELECT COUNT(*)::int FROM rooms r WHERE r."areaId" = a.id AND r."deletedAt" IS NULL), 0) AS "roomCount",
@@ -57,14 +63,14 @@ export class TablesService {
        WHERE a."deletedAt" IS NULL
          AND ($1::text IS NULL OR a."branchId" = $1)
        ORDER BY a."createdAt" DESC`,
-      [branchId || null],
+       [scopedBranchId || null],
     );
     return rows;
   }
 
-  async createArea(input: AreaInput) {
+  async createArea(user: CurrentUser, input: AreaInput) {
     const name = this.validateName(input.name, 'Tên khu vực');
-    const branchId = input.branchId || null;
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId);
 
     const id = randomUUID();
     await this.db.query(
@@ -75,30 +81,36 @@ export class TablesService {
     return { id, name, branchId };
   }
 
-  async updateArea(id: string, input: AreaInput) {
+  async updateArea(user: CurrentUser, id: string, input: AreaInput) {
     const existed = await this.db.query<{ id: string; "branchId": string | null }>(
       'SELECT id, "branchId" FROM areas WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
       [id],
     );
     if (!existed[0]) throw new NotFoundException('Khu vực không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
 
     const name = this.validateName(input.name, 'Tên khu vực');
-    const branchId = input.branchId ?? existed[0].branchId;
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? existed[0].branchId);
 
     await this.db.query('UPDATE areas SET name = $2, "branchId" = $3, "updatedAt" = NOW() WHERE id = $1', [id, name, branchId]);
     return { id, name, branchId };
   }
 
-  async deleteArea(id: string) {
-    const existed = await this.db.query<{ id: string }>('SELECT id FROM areas WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1', [id]);
+  async deleteArea(user: CurrentUser, id: string) {
+    const existed = await this.db.query<{ id: string; "branchId": string | null }>(
+      'SELECT id, "branchId" FROM areas WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
+      [id],
+    );
     if (!existed[0]) throw new NotFoundException('Khu vực không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
     await this.db.query('UPDATE rooms SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE "areaId" = $1 AND "deletedAt" IS NULL', [id]);
     await this.db.query('UPDATE tables SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE "areaId" = $1 AND "deletedAt" IS NULL', [id]);
     await this.db.query('UPDATE areas SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1', [id]);
     return { success: true };
   }
 
-  async listRooms(params: { areaId?: string; branchId?: string }) {
+  async listRooms(user: CurrentUser, params: { areaId?: string; branchId?: string }) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
     const rows = await this.db.query(
       `SELECT r.id, r.name, r."areaId", r."branchId", r."createdAt", r."updatedAt",
               a.name AS "areaName",
@@ -109,15 +121,16 @@ export class TablesService {
          AND ($1::text IS NULL OR r."areaId" = $1)
          AND ($2::text IS NULL OR r."branchId" = $2)
        ORDER BY r."createdAt" DESC`,
-      [params.areaId || null, params.branchId || null],
+      [params.areaId || null, scopedBranchId || null],
     );
     return rows;
   }
 
-  async createRoom(input: RoomInput) {
+  async createRoom(user: CurrentUser, input: RoomInput) {
     const name = this.validateName(input.name, 'Tên phòng');
     const area = await this.ensureAreaExists(input.areaId);
-    const branchId = input.branchId ?? area.branchId ?? null;
+    this.branchPolicy.assertResourceBranchAccess(user, area.branchId);
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? area.branchId);
 
     const id = randomUUID();
     await this.db.query(
@@ -128,17 +141,19 @@ export class TablesService {
     return { id, name, areaId: input.areaId, branchId };
   }
 
-  async updateRoom(id: string, input: RoomInput) {
+  async updateRoom(user: CurrentUser, id: string, input: RoomInput) {
     const existed = await this.db.query<{ id: string; "areaId": string; "branchId": string | null }>(
       'SELECT id, "areaId", "branchId" FROM rooms WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
       [id],
     );
     if (!existed[0]) throw new NotFoundException('Phòng không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
 
     const name = this.validateName(input.name, 'Tên phòng');
     const areaId = input.areaId || existed[0].areaId;
     const area = await this.ensureAreaExists(areaId);
-    const branchId = input.branchId ?? area.branchId ?? existed[0].branchId ?? null;
+    this.branchPolicy.assertResourceBranchAccess(user, area.branchId);
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? area.branchId ?? existed[0].branchId);
 
     await this.db.query(
       'UPDATE rooms SET name = $2, "areaId" = $3, "branchId" = $4, "updatedAt" = NOW() WHERE id = $1',
@@ -148,15 +163,19 @@ export class TablesService {
     return { id, name, areaId, branchId };
   }
 
-  async deleteRoom(id: string) {
-    const existed = await this.db.query<{ id: string }>('SELECT id FROM rooms WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1', [id]);
+  async deleteRoom(user: CurrentUser, id: string) {
+    const existed = await this.db.query<{ id: string; "branchId": string | null }>(
+      'SELECT id, "branchId" FROM rooms WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
+      [id],
+    );
     if (!existed[0]) throw new NotFoundException('Phòng không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
     await this.db.query('UPDATE tables SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE "roomId" = $1 AND "deletedAt" IS NULL', [id]);
     await this.db.query('UPDATE rooms SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1', [id]);
     return { success: true };
   }
 
-  async listDiningTables(params: {
+  async listDiningTables(user: CurrentUser, params: {
     branchId?: string;
     areaId?: string;
     roomId?: string;
@@ -164,6 +183,7 @@ export class TablesService {
     page?: number;
     pageSize?: number;
   }) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
     const page = Math.max(1, Number(params.page) || 1);
     const pageSize = Math.min(7, Math.max(1, Number(params.pageSize) || 7));
     const offset = (page - 1) * pageSize;
@@ -172,9 +192,9 @@ export class TablesService {
     const args: unknown[] = [];
     let idx = 1;
 
-    if (params.branchId) {
+    if (scopedBranchId) {
       whereParts.push(`t."branchId" = $${idx++}`);
-      args.push(params.branchId);
+      args.push(scopedBranchId);
     }
     if (params.areaId) {
       whereParts.push(`t."areaId" = $${idx++}`);
@@ -229,11 +249,12 @@ export class TablesService {
     };
   }
 
-  async createDiningTable(input: DiningTableInput) {
+  async createDiningTable(user: CurrentUser, input: DiningTableInput) {
     const name = this.validateName(input.name, 'Tên bàn');
     if (!input.areaId) throw new BadRequestException('Khu vực là bắt buộc');
     const area = await this.ensureAreaExists(input.areaId);
-    const branchId = input.branchId ?? area.branchId ?? null;
+    this.branchPolicy.assertResourceBranchAccess(user, area.branchId);
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? area.branchId);
     const roomId = input.roomId || null;
 
     if (roomId) {
@@ -253,7 +274,7 @@ export class TablesService {
     return { id, name, areaId: input.areaId, roomId, branchId };
   }
 
-  async updateDiningTable(id: string, input: DiningTableInput) {
+  async updateDiningTable(user: CurrentUser, id: string, input: DiningTableInput) {
     const existed = await this.db.query<{
       id: string;
       "branchId": string | null;
@@ -261,12 +282,14 @@ export class TablesService {
       "roomId": string | null;
     }>('SELECT id, "branchId", "areaId", "roomId" FROM tables WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1', [id]);
     if (!existed[0]) throw new NotFoundException('Bàn không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
 
     const name = this.validateName(input.name, 'Tên bàn');
     const areaId = input.areaId || existed[0].areaId;
     if (!areaId) throw new BadRequestException('Khu vực là bắt buộc');
     const area = await this.ensureAreaExists(areaId);
-    const branchId = input.branchId ?? area.branchId ?? existed[0].branchId ?? null;
+    this.branchPolicy.assertResourceBranchAccess(user, area.branchId);
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? area.branchId ?? existed[0].branchId);
     const roomId = input.roomId === undefined ? existed[0].roomId : input.roomId || null;
 
     if (roomId) {
@@ -286,9 +309,13 @@ export class TablesService {
     return { id, name, areaId, roomId, branchId };
   }
 
-  async deleteDiningTable(id: string) {
-    const existed = await this.db.query<{ id: string }>('SELECT id FROM tables WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1', [id]);
+  async deleteDiningTable(user: CurrentUser, id: string) {
+    const existed = await this.db.query<{ id: string; "branchId": string | null }>(
+      'SELECT id, "branchId" FROM tables WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
+      [id],
+    );
     if (!existed[0]) throw new NotFoundException('Bàn không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
 
     const orderRefs = await this.db.query<{ count: string }>(
       'SELECT COUNT(*)::text AS count FROM orders WHERE "tableId" = $1 AND status <> CAST($2 AS "OrderStatus")',
@@ -302,7 +329,8 @@ export class TablesService {
     return { success: true };
   }
 
-  async listDiningTableOptions(params: { branchId?: string }) {
+  async listDiningTableOptions(user: CurrentUser, params: { branchId?: string }) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
     const rows = await this.db.query(
       `SELECT t.id, t.name, t."areaId", t."roomId", a.name AS "areaName", r.name AS "roomName"
        FROM tables t
@@ -311,7 +339,7 @@ export class TablesService {
        WHERE t."deletedAt" IS NULL
          AND ($1::text IS NULL OR t."branchId" = $1)
        ORDER BY a.name ASC, r.name ASC NULLS FIRST, t.name ASC`,
-      [params.branchId || null],
+       [scopedBranchId || null],
     );
     return rows;
   }

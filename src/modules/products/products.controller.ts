@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  UseGuards,
   Query,
   Param,
   Patch,
@@ -13,6 +14,9 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ProductsService } from './products.service';
+import { AuthGuard } from '../../common/auth.guard';
+import { CurrentUser } from '../../common/current-user.decorator';
+import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
 
 type CreateProductDto = {
   sku?: string;
@@ -37,11 +41,13 @@ type UpdateCategoryDto = {
 };
 
 @Controller()
+@UseGuards(AuthGuard)
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Get('products')
   listProducts(
+    @CurrentUser() user: CurrentUserType,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
     @Query('categoryId') categoryId?: string,
@@ -56,27 +62,27 @@ export class ProductsController {
       stockStatus: stockStatus || 'all',
       branchId: branchId || undefined,
       search: search || undefined,
-    });
+    }, user);
   }
 
   @Get('products/:id')
-  getProductById(@Param('id') id: string) {
-    return this.productsService.getProductById(id);
+  getProductById(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.productsService.getProductById(id, user);
   }
 
   @Post('products')
-  createProduct(@Body() dto: CreateProductDto) {
-    return this.productsService.createProduct(dto);
+  createProduct(@CurrentUser() user: CurrentUserType, @Body() dto: CreateProductDto) {
+    return this.productsService.createProduct(dto, user);
   }
 
   @Patch('products/:id')
-  updateProduct(@Param('id') id: string, @Body() dto: CreateProductDto) {
-    return this.productsService.updateProduct(id, dto);
+  updateProduct(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto: CreateProductDto) {
+    return this.productsService.updateProduct(id, dto, user);
   }
 
   @Delete('products/:id')
-  deleteProduct(@Param('id') id: string) {
-    return this.productsService.deleteProduct(id);
+  deleteProduct(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.productsService.deleteProduct(id, user);
   }
 
   @Post('products/upload-image')

@@ -2,6 +2,8 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { randomUUID } from 'crypto';
 import sharp from 'sharp';
 import { PgService } from '../../database/pg.service';
+import { BranchPolicyService } from '../../common/branch-policy.service';
+import type { CurrentUser } from '../../common/auth.types';
 
 type CreateProductInput = {
   sku?: string;
@@ -41,7 +43,10 @@ type UpdateCategoryInput = {
 
 @Injectable()
 export class ProductsService {
-  constructor(private db: PgService) {}
+  constructor(
+    private db: PgService,
+    private readonly branchPolicy: BranchPolicyService,
+  ) {}
 
   async processAndSaveImage(file: Express.Multer.File) {
     const acceptedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
@@ -121,7 +126,8 @@ export class ProductsService {
     };
   }
 
-  async listProducts(params: ListProductsParams) {
+  async listProducts(params: ListProductsParams, user: CurrentUser) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
     const page = Math.max(1, Number(params.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(params.pageSize) || 20));
     const offset = (page - 1) * pageSize;
@@ -136,7 +142,7 @@ export class ProductsService {
       whereIndex += 1;
     }
 
-    if (params.branchId) {
+    if (scopedBranchId) {
       whereParts.push(
         `EXISTS (
            SELECT 1
@@ -146,7 +152,7 @@ export class ProductsService {
              AND pbx."isActive" = true
          )`,
       );
-      whereParams.push(params.branchId);
+      whereParams.push(scopedBranchId);
       whereIndex += 1;
     }
 
@@ -222,8 +228,25 @@ export class ProductsService {
       [...whereParams, pageSize, offset],
     );
 
+    const normalizedItems = (items as any[]).map((item) => {
+      if (!scopedBranchId) return item;
+      const rawConfigs = Array.isArray(item.branchConfigs)
+        ? item.branchConfigs
+        : typeof item.branchConfigs === 'string'
+          ? JSON.parse(item.branchConfigs)
+          : [];
+      const filteredConfigs = rawConfigs.filter((cfg: any) => cfg?.branchId === scopedBranchId);
+      const branchStock = filteredConfigs.reduce((sum: number, cfg: any) => sum + Number(cfg?.stock || 0), 0);
+      return {
+        ...item,
+        stock: branchStock,
+        branchNames: filteredConfigs.map((cfg: any) => cfg.branchName).filter(Boolean).join(', '),
+        branchConfigs: filteredConfigs,
+      };
+    });
+
     return {
-      items,
+      items: normalizedItems,
       pagination: {
         page,
         pageSize,
@@ -233,7 +256,8 @@ export class ProductsService {
     };
   }
 
-  async getProductById(id: string) {
+  async getProductById(id: string, user: CurrentUser) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user);
     const rows = await this.db.query(
       `SELECT p.id, p.sku, p.name, p.price, p."costPrice", p.unit, p.weight,
               COALESCE(SUM(pb.stock), 0) AS stock,
@@ -256,24 +280,47 @@ export class ProductsService {
        LEFT JOIN product_branches pb ON pb."productId" = p.id
        LEFT JOIN branches b ON b.id = pb."branchId"
        WHERE p.id = $1 AND p."deletedAt" IS NULL
+         AND ($2::text IS NULL OR EXISTS (
+           SELECT 1 FROM product_branches pbx
+           WHERE pbx."productId" = p.id
+             AND pbx."branchId" = $2
+         ))
        GROUP BY p.id, c.id
        LIMIT 1`,
-      [id],
+      [id, scopedBranchId || null],
     );
 
     if (!rows[0]) {
       throw new NotFoundException('Hàng hóa không tồn tại');
     }
 
+    if (scopedBranchId) {
+      const rawConfigs = Array.isArray(rows[0].branchConfigs)
+        ? rows[0].branchConfigs
+        : typeof rows[0].branchConfigs === 'string'
+          ? JSON.parse(rows[0].branchConfigs)
+          : [];
+      const filteredConfigs = rawConfigs.filter((cfg: any) => cfg?.branchId === scopedBranchId);
+      return {
+        ...rows[0],
+        stock: filteredConfigs.reduce((sum: number, cfg: any) => sum + Number(cfg?.stock || 0), 0),
+        branchConfigs: filteredConfigs,
+      };
+    }
+
     return rows[0];
   }
 
-  private async normalizeBranchConfigs(branchConfigs?: BranchConfigInput[]) {
+  private async normalizeBranchConfigs(branchConfigs: BranchConfigInput[] | undefined, user: CurrentUser) {
     if (!branchConfigs || branchConfigs.length === 0) {
       throw new BadRequestException('Vui lòng chọn ít nhất một chi nhánh cho hàng hóa');
     }
 
-    const branchIds = [...new Set(branchConfigs.map((item) => item.branchId).filter(Boolean))];
+    const sourceConfigs = this.branchPolicy.isAdmin(user)
+      ? branchConfigs
+      : [{ branchId: this.branchPolicy.resolveWriteBranchId(user), isActive: true, stock: branchConfigs?.[0]?.stock }];
+
+    const branchIds = [...new Set(sourceConfigs.map((item) => item.branchId).filter(Boolean))];
     if (branchIds.length === 0) {
       throw new BadRequestException('Vui lòng chọn ít nhất một chi nhánh cho hàng hóa');
     }
@@ -288,7 +335,7 @@ export class ProductsService {
     }
 
     const uniqueBranchConfigs = branchIds.map((branchId) => {
-      const matched = branchConfigs.find((item) => item.branchId === branchId);
+      const matched = sourceConfigs.find((item) => item.branchId === branchId);
       const stock = Number(matched?.stock ?? 0);
       if (!Number.isFinite(stock) || stock < 0) {
         throw new BadRequestException('Tồn kho theo chi nhánh không hợp lệ');
@@ -335,7 +382,7 @@ export class ProductsService {
     }
   }
 
-  async createProduct(input: CreateProductInput) {
+  async createProduct(input: CreateProductInput, user: CurrentUser) {
     this.validateProductInput(input);
 
     if (input.categoryId) {
@@ -348,7 +395,7 @@ export class ProductsService {
       }
     }
 
-    const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs);
+    const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
 
     const id = randomUUID();
@@ -385,13 +432,23 @@ export class ProductsService {
     return rows[0];
   }
 
-  async updateProduct(id: string, input: CreateProductInput) {
+  async updateProduct(id: string, input: CreateProductInput, user: CurrentUser) {
     const existed = await this.db.query<{ id: string; imageUrl: string | null }>(
       'SELECT id, "imageUrl" FROM products WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
       [id],
     );
     if (!existed[0]) {
       throw new NotFoundException('Hàng hóa không tồn tại');
+    }
+
+    if (!this.branchPolicy.isAdmin(user)) {
+      const branchRef = await this.db.query<{ id: string }>(
+        'SELECT id FROM product_branches WHERE "productId" = $1 AND "branchId" = $2 LIMIT 1',
+        [id, user.branchId],
+      );
+      if (!branchRef[0]) {
+        throw new NotFoundException('Hàng hóa không tồn tại');
+      }
     }
 
     this.validateProductInput(input);
@@ -406,7 +463,7 @@ export class ProductsService {
       }
     }
 
-    const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs);
+    const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
 
     await this.db.query(
@@ -450,13 +507,23 @@ export class ProductsService {
     return rows[0];
   }
 
-  async deleteProduct(id: string) {
+  async deleteProduct(id: string, user: CurrentUser) {
     const existed = await this.db.query<{ id: string; imageUrl: string | null }>(
       'SELECT id, "imageUrl" FROM products WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
       [id],
     );
     if (!existed[0]) {
       throw new NotFoundException('Hàng hóa không tồn tại');
+    }
+
+    if (!this.branchPolicy.isAdmin(user)) {
+      const branchRef = await this.db.query<{ id: string }>(
+        'SELECT id FROM product_branches WHERE "productId" = $1 AND "branchId" = $2 LIMIT 1',
+        [id, user.branchId],
+      );
+      if (!branchRef[0]) {
+        throw new NotFoundException('Hàng hóa không tồn tại');
+      }
     }
 
     const orderRefs = await this.db.query<{ count: string }>(
