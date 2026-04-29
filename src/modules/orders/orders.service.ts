@@ -211,7 +211,7 @@ export class OrdersService {
     page?: number;
     pageSize?: number;
     search?: string;
-    statuses?: string[];
+    orderStates?: string[];
     areaId?: string;
     roomId?: string;
     tableId?: string;
@@ -224,7 +224,7 @@ export class OrdersService {
     const pageSize = Math.min(50, Math.max(1, Number(params.pageSize) || 10));
     const offset = (page - 1) * pageSize;
     const search = params.search?.trim() || null;
-    const statuses = Array.isArray(params.statuses) && params.statuses.length > 0 ? params.statuses : null;
+    const orderStates = Array.isArray(params.orderStates) && params.orderStates.length > 0 ? params.orderStates : null;
     const areaId = params.areaId || null;
     const roomId = params.roomId || null;
     const tableId = params.tableId || null;
@@ -255,7 +255,7 @@ export class OrdersService {
          AND ($6::text IS NULL OR t.id = $6)
          AND ($7::timestamptz IS NULL OR od."createdAt" >= $7)
          AND ($8::timestamptz IS NULL OR od."createdAt" <= $8)`,
-      [scopedBranchId || null, search, statuses, areaId, roomId, tableId, startDateIso, endDateIso],
+       [scopedBranchId || null, search, orderStates, areaId, roomId, tableId, startDateIso, endDateIso],
     );
     const total = Number(countRows[0]?.total || 0);
     const rows = await this.db.query<{
@@ -269,7 +269,7 @@ export class OrdersService {
       "finalAmount": string;
       "paidAmount": string;
       "creatorName": string | null;
-      status: 'DRAFT' | 'PAID' | 'DELETED' | 'PARTIAL';
+      orderState: 'DRAFT' | 'PAID' | 'DELETED' | 'PARTIAL';
       "createdAt": string;
     }>(
       `SELECT od.id,
@@ -282,7 +282,7 @@ export class OrdersService {
               od."finalAmount"::text AS "finalAmount",
               od."paidAmount"::text AS "paidAmount",
               COALESCE(NULLIF(u."fullName", ''), u.username, od."userId") AS "creatorName",
-              od."orderState" AS status,
+              od."orderState" AS "orderState",
               od."createdAt"
        FROM orders od
        LEFT JOIN users u ON u.id = od."userId"
@@ -308,7 +308,7 @@ export class OrdersService {
          AND ($8::timestamptz IS NULL OR od."createdAt" <= $8)
        ORDER BY od."createdAt" DESC
        LIMIT $9 OFFSET $10`,
-      [scopedBranchId || null, search, statuses, areaId, roomId, tableId, startDateIso, endDateIso, pageSize, offset],
+       [scopedBranchId || null, search, orderStates, areaId, roomId, tableId, startDateIso, endDateIso, pageSize, offset],
     );
 
     return {
@@ -323,7 +323,7 @@ export class OrdersService {
       finalAmount: Number(row.finalAmount || 0),
       paidAmount: Number(row.paidAmount || 0),
       creatorName: row.creatorName || '-',
-      status: row.status,
+      orderState: row.orderState,
       createdAt: row.createdAt,
       };
       }),
@@ -443,7 +443,7 @@ export class OrdersService {
       totalAmount: string;
       finalAmount: string;
       paidAmount: string;
-      status: 'DRAFT' | 'PAID' | 'DELETED' | 'PARTIAL';
+      orderState: 'DRAFT' | 'PAID' | 'DELETED' | 'PARTIAL';
       branchId: string | null;
       createdAt: string;
     }>(
@@ -460,7 +460,7 @@ export class OrdersService {
               od."totalAmount"::text AS "totalAmount",
               od."finalAmount"::text AS "finalAmount",
               od."paidAmount"::text AS "paidAmount",
-              od."orderState" AS status,
+              od."orderState" AS "orderState",
               od."branchId" AS "branchId",
               od."createdAt"
        FROM orders od
@@ -518,7 +518,7 @@ export class OrdersService {
       totalAmount: Number(rows[0].totalAmount || 0),
       finalAmount: Number(rows[0].finalAmount || 0),
       paidAmount: Number(rows[0].paidAmount || 0),
-      status: rows[0].status,
+      orderState: rows[0].orderState,
       createdAt: rows[0].createdAt,
       items: itemRows.map((item) => {
         const baseUnitPrice = Number(item.baseUnitPrice || 0);
@@ -729,7 +729,7 @@ export class OrdersService {
       });
     });
 
-    return { id, paidAmount: normalizedPaid, status: orderState };
+    return { id, paidAmount: normalizedPaid, orderState };
   }
 
   async markDeleted(user: CurrentUser, id: string) {

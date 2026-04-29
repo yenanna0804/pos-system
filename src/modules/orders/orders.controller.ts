@@ -61,7 +61,8 @@ export class OrdersController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
     @Query('search') search?: string,
-    @Query('statuses') statuses?: string,
+    @Query('orderStates') orderStates?: string,
+    @Query('statuses') legacyStatuses?: string,
     @Query('areaId') areaId?: string,
     @Query('roomId') roomId?: string,
     @Query('tableId') tableId?: string,
@@ -73,7 +74,9 @@ export class OrdersController {
       page: Number(page) || 1,
       pageSize: Number(pageSize) || 10,
       search,
-      statuses: statuses ? statuses.split(',').map((v) => v.trim()).filter(Boolean) : undefined,
+      orderStates: (orderStates || legacyStatuses)
+        ? (orderStates || legacyStatuses)?.split(',').map((v) => v.trim()).filter(Boolean)
+        : undefined,
       areaId,
       roomId,
       tableId,
