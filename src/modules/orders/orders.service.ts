@@ -131,7 +131,7 @@ export class OrdersService {
          WHEN COALESCE("paidAmount", 0) >= COALESCE("finalAmount", 0) THEN 'PAID'
          ELSE 'PARTIAL'
        END
-       WHERE "orderState" IS NULL OR "orderState" = ''`,
+       WHERE "orderState" IS NULL OR "orderState"::text = ''`,
     );
     await this.db.query('UPDATE orders SET "surchargeAmount" = 0 WHERE "surchargeAmount" IS NULL');
     await this.db.query('UPDATE order_items SET "baseUnitPrice" = "unitPrice" WHERE "baseUnitPrice" IS NULL');
