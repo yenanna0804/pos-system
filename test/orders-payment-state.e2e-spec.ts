@@ -110,7 +110,7 @@ describe('Order payment state integration', () => {
       .set('Authorization', `Bearer ${token}`)
       .expect(200);
 
-    expect(detailRes.body?.status).toBe('PARTIAL');
+    expect(detailRes.body?.orderState).toBe('PARTIAL');
     expect(Number(detailRes.body?.paidAmount || 0)).toBe(0);
   });
 });

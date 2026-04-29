@@ -1,0 +1,2 @@
+-- This migration was left empty in source control.
+-- Keep as no-op to preserve migration history order and allow deploy to continue.

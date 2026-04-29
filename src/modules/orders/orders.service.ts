@@ -64,8 +64,6 @@ type OrdersExecutor = {
 
 @Injectable()
 export class OrdersService {
-  private schemaReady = false;
-
   constructor(
     private readonly db: PgService,
     private readonly branchPolicy: BranchPolicyService,
@@ -80,75 +78,11 @@ export class OrdersService {
 
   private async generateNextOrderCode(executor: OrdersExecutor, date: Date) {
     const prefix = this.buildOrderCodePrefix(date);
-    const startIndex = prefix.length + 1;
     const rows = await executor.query<{ nextSeq: string }>(
-      `SELECT COALESCE(MAX(CAST(SUBSTRING("orderCode" FROM $2) AS integer)), 0) + 1 AS "nextSeq"
-       FROM orders
-       WHERE "orderCode" LIKE $1
-         AND "orderCode" ~ $3`,
-      [`${prefix}%`, startIndex, `^${prefix}[0-9]+$`],
+      `SELECT nextval('public.orders_order_code_seq')::text AS "nextSeq"`,
     );
     const nextSeq = Number(rows[0]?.nextSeq || 1);
     return `${prefix}${nextSeq}`;
-  }
-
-  private async ensureSchema() {
-    if (this.schemaReady) return;
-
-    await this.db.query(`
-      ALTER TABLE orders ADD COLUMN IF NOT EXISTS "customerName" text;
-    `);
-    await this.db.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS "orderCode" text');
-    await this.db.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS "roomId" text');
-
-    await this.db.query('ALTER TABLE orders DROP COLUMN IF EXISTS "billItems"');
-    await this.db.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS "paidAmount" numeric(14,2) NOT NULL DEFAULT 0');
-    await this.db.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS "orderState" text');
-    await this.db.query(`
-      DO $$
-      BEGIN
-        IF EXISTS (
-          SELECT 1
-          FROM information_schema.columns
-          WHERE table_name = 'orders' AND column_name = 'taxAmount'
-        ) AND NOT EXISTS (
-          SELECT 1
-          FROM information_schema.columns
-          WHERE table_name = 'orders' AND column_name = 'surchargeAmount'
-        ) THEN
-          EXECUTE 'ALTER TABLE orders RENAME COLUMN "taxAmount" TO "surchargeAmount"';
-        END IF;
-      END $$;
-    `);
-    await this.db.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS "surchargeAmount" numeric(14,2) NOT NULL DEFAULT 0');
-    await this.db.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS "baseUnitPrice" numeric(14,2)');
-    await this.db.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_code_unique ON orders("orderCode")');
-    await this.db.query(`UPDATE orders SET "orderCode" = CONCAT('HDN-', UPPER(RIGHT(id, 8))) WHERE "orderCode" IS NULL OR "orderCode" = ''`);
-    await this.db.query(
-      `UPDATE orders
-       SET "orderState" = CASE
-         WHEN COALESCE("paidAmount", 0) <= 0 THEN 'DRAFT'
-         WHEN COALESCE("paidAmount", 0) >= COALESCE("finalAmount", 0) THEN 'PAID'
-         ELSE 'PARTIAL'
-       END
-       WHERE "orderState" IS NULL OR "orderState"::text = ''`,
-    );
-    await this.db.query('UPDATE orders SET "surchargeAmount" = 0 WHERE "surchargeAmount" IS NULL');
-    await this.db.query('UPDATE order_items SET "baseUnitPrice" = "unitPrice" WHERE "baseUnitPrice" IS NULL');
-
-    await this.db.query(`
-      CREATE TABLE IF NOT EXISTS order_logs (
-        id text PRIMARY KEY,
-        "orderId" text NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-        action text NOT NULL,
-        detail text,
-        "snapshot" jsonb,
-        "createdBy" text REFERENCES users(id) ON DELETE SET NULL,
-        "createdAt" timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    this.schemaReady = true;
   }
 
   private async logAction(executor: OrdersExecutor, params: {
@@ -160,7 +94,7 @@ export class OrdersService {
   }) {
     await executor.query(
       `INSERT INTO order_logs (id, "orderId", action, detail, snapshot, "createdBy", "createdAt")
-       VALUES ($1, $2, $3, $4, CAST($5 AS jsonb), $6, NOW())`,
+       VALUES ($1, $2, $3::"OrderLogAction", $4, CAST($5 AS jsonb), $6, NOW())`,
       [
         randomUUID(),
         params.orderId,
@@ -218,7 +152,6 @@ export class OrdersService {
     startDate?: string;
     endDate?: string;
   }) {
-    await this.ensureSchema();
     const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
     const page = Math.max(1, Number(params.page) || 1);
     const pageSize = Math.min(50, Math.max(1, Number(params.pageSize) || 10));
@@ -249,7 +182,7 @@ export class OrdersService {
             COALESCE(od."customerName", '') ILIKE CONCAT('%', $2, '%') OR
             COALESCE(u."fullName", u.username, '') ILIKE CONCAT('%', $2, '%')
          ))
-         AND ($3::text[] IS NULL OR od."orderState" = ANY($3))
+         AND ($3::text[] IS NULL OR od."orderState"::text = ANY($3))
          AND ($4::text IS NULL OR COALESCE(a.id, ar.id) = $4)
          AND ($5::text IS NULL OR COALESCE(r.id, rr.id) = $5)
          AND ($6::text IS NULL OR t.id = $6)
@@ -300,7 +233,7 @@ export class OrdersService {
             COALESCE(od."customerName", '') ILIKE CONCAT('%', $2, '%') OR
             COALESCE(u."fullName", u.username, '') ILIKE CONCAT('%', $2, '%')
          ))
-         AND ($3::text[] IS NULL OR od."orderState" = ANY($3))
+         AND ($3::text[] IS NULL OR od."orderState"::text = ANY($3))
          AND ($4::text IS NULL OR COALESCE(a.id, ar.id) = $4)
          AND ($5::text IS NULL OR COALESCE(r.id, rr.id) = $5)
          AND ($6::text IS NULL OR t.id = $6)
@@ -337,7 +270,6 @@ export class OrdersService {
   }
 
   async createOrder(user: CurrentUser, input: CreateOrderInput) {
-    await this.ensureSchema();
     if (input.entityType !== 'TABLE' && input.entityType !== 'ROOM') {
       throw new BadRequestException('Loại đối tượng hóa đơn không hợp lệ');
     }
@@ -380,7 +312,6 @@ export class OrdersService {
     let orderCode = '';
     const paidAmount = 0;
     await this.db.withTransaction(async (tx) => {
-      await tx.query('LOCK TABLE orders IN SHARE ROW EXCLUSIVE MODE');
       orderCode = await this.generateNextOrderCode(tx, new Date());
 
       await tx.query(
@@ -388,7 +319,7 @@ export class OrdersService {
            id, "orderCode", "tableId", "userId", "totalAmount", "discountAmount", "surchargeAmount", "finalAmount",
           "orderState", "customerName", "paidAmount", "branchId", "roomId", "createdAt", "updatedAt"
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::"OrderLifecycleState", $10, $11, $12, $13, NOW(), NOW())`,
         [
           id,
           orderCode,
@@ -428,7 +359,6 @@ export class OrdersService {
   }
 
   async getOrderById(user: CurrentUser, id: string) {
-    await this.ensureSchema();
     const rows = await this.db.query<{
       id: string;
       code: string;
@@ -545,7 +475,6 @@ export class OrdersService {
   }
 
   async updateOrder(user: CurrentUser, id: string, input: UpdateOrderInput) {
-    await this.ensureSchema();
     const rows = await this.db.query<{
       id: string;
       "branchId": string | null;
@@ -645,7 +574,6 @@ export class OrdersService {
   }
 
   async printOrder(user: CurrentUser, id: string) {
-    await this.ensureSchema();
     const rows = await this.db.query<{ id: string; "branchId": string | null }>(
       'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
       [id],
@@ -666,7 +594,6 @@ export class OrdersService {
   }
 
   async getOrderLogs(user: CurrentUser, id: string) {
-    await this.ensureSchema();
     const rows = await this.db.query<{ id: string; "branchId": string | null }>(
       'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
       [id],
@@ -701,7 +628,6 @@ export class OrdersService {
   }
 
   async updatePayment(user: CurrentUser, id: string, paidAmount: number) {
-    await this.ensureSchema();
     const rows = await this.db.query<{ id: string; "branchId": string | null; "finalAmount": string }>(
       'SELECT id, "branchId", "finalAmount" FROM orders WHERE id = $1 LIMIT 1',
       [id],
@@ -714,7 +640,7 @@ export class OrdersService {
     const orderState = normalizedPaid >= totalAmount ? 'PAID' : 'PARTIAL';
 
     await this.db.withTransaction(async (tx) => {
-      await tx.query('UPDATE orders SET "paidAmount" = $2, "orderState" = $3, "updatedAt" = NOW() WHERE id = $1', [
+      await tx.query('UPDATE orders SET "paidAmount" = $2, "orderState" = $3::"OrderLifecycleState", "updatedAt" = NOW() WHERE id = $1', [
         id,
         normalizedPaid,
         orderState,
@@ -733,7 +659,6 @@ export class OrdersService {
   }
 
   async markDeleted(user: CurrentUser, id: string) {
-    await this.ensureSchema();
     const rows = await this.db.query<{ id: string; "branchId": string | null }>(
       'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
       [id],
@@ -742,7 +667,7 @@ export class OrdersService {
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
 
     await this.db.withTransaction(async (tx) => {
-      await tx.query('UPDATE orders SET "orderState" = $2, "updatedAt" = NOW() WHERE id = $1', [
+      await tx.query('UPDATE orders SET "orderState" = $2::"OrderLifecycleState", "updatedAt" = NOW() WHERE id = $1', [
         id,
         'DELETED',
       ]);
