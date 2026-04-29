@@ -30,7 +30,7 @@ type CreateProductDto = {
   price: number;
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
-  comboItems?: { itemProductId: string; quantity: number }[];
+  comboItems?: { itemProductId: string; quantity: number; itemName?: string; itemUnit?: string }[];
   imageUrl?: string | null;
   imageThumb?: string | null;
 };

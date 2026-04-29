@@ -17,7 +17,7 @@ type CreateProductInput = {
   price: number;
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
-  comboItems?: { itemProductId: string; quantity: number }[];
+  comboItems?: { itemProductId: string; quantity: number; itemName?: string; itemUnit?: string }[];
   imageUrl?: string | null;
   imageThumb?: string | null;
 };
@@ -282,7 +282,8 @@ export class ProductsService {
                       'itemProductId', pci."itemProductId",
                       'quantity', pci.quantity,
                       'itemName', pi.name,
-                      'itemPrice', pi.price
+                      'itemPrice', pi.price,
+                      'itemUnit', pi.unit
                     )
                     ORDER BY pi.name
                   )
