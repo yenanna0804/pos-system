@@ -318,8 +318,8 @@ export class TablesService {
     this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
 
     const orderRefs = await this.db.query<{ count: string }>(
-      'SELECT COUNT(*)::text AS count FROM orders WHERE "tableId" = $1 AND status <> CAST($2 AS "OrderStatus")',
-      [id, 'CANCELLED'],
+      'SELECT COUNT(*)::text AS count FROM orders WHERE "tableId" = $1 AND "orderState" <> $2',
+      [id, 'DELETED'],
     );
     if (Number(orderRefs[0]?.count || 0) > 0) {
       throw new BadRequestException('Không thể xóa bàn đã phát sinh hóa đơn');

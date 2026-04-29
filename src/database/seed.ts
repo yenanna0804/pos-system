@@ -17,6 +17,9 @@ export async function seed(db: PgService) {
   await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "roomId" text');
   await db.query('ALTER TABLE tables ADD COLUMN IF NOT EXISTS "deletedAt" timestamp(3)');
 
+  await db.query('DROP TABLE IF EXISTS order_draft_logs');
+  await db.query('DROP TABLE IF EXISTS order_drafts');
+
   await db.query(`
     CREATE TABLE IF NOT EXISTS areas (
       id text PRIMARY KEY,
