@@ -11,7 +11,12 @@ type CreateOrderDto = {
   customerName?: string;
   totalAmount: number;
   discountAmount?: number;
+  discountMode?: 'percent' | 'amount';
+  discountValue?: number;
   surchargeAmount?: number;
+  surchargeMode?: 'percent' | 'amount';
+  surchargeValue?: number;
+  paidAmount?: number;
   billItems: {
     lineId: string;
     productId: string;
@@ -25,10 +30,6 @@ type CreateOrderDto = {
   branchId?: string;
 };
 
-type UpdatePaymentDto = {
-  paidAmount: number;
-};
-
 type UpdateOrderDto = {
   entityType?: 'TABLE' | 'ROOM';
   tableId?: string;
@@ -36,7 +37,12 @@ type UpdateOrderDto = {
   customerName?: string;
   totalAmount?: number;
   discountAmount?: number;
+  discountMode?: 'percent' | 'amount';
+  discountValue?: number;
   surchargeAmount?: number;
+  surchargeMode?: 'percent' | 'amount';
+  surchargeValue?: number;
+  paidAmount?: number;
   billItems?: {
     lineId: string;
     productId: string;
@@ -108,11 +114,6 @@ export class OrdersController {
   @Get('orders/:id/logs')
   getOrderLogs(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.ordersService.getOrderLogs(user, id);
-  }
-
-  @Patch('orders/:id/payment')
-  updatePayment(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto: UpdatePaymentDto) {
-    return this.ordersService.updatePayment(user, id, dto.paidAmount);
   }
 
   @Delete('orders/:id')

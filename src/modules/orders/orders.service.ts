@@ -12,7 +12,12 @@ type CreateOrderInput = {
   customerName?: string;
   totalAmount: number;
   discountAmount?: number;
+  discountMode?: 'percent' | 'amount';
+  discountValue?: number;
   surchargeAmount?: number;
+  surchargeMode?: 'percent' | 'amount';
+  surchargeValue?: number;
+  paidAmount?: number;
   billItems: {
     lineId: string;
     productId: string;
@@ -33,7 +38,12 @@ type UpdateOrderInput = {
   customerName?: string;
   totalAmount?: number;
   discountAmount?: number;
+  discountMode?: 'percent' | 'amount';
+  discountValue?: number;
   surchargeAmount?: number;
+  surchargeMode?: 'percent' | 'amount';
+  surchargeValue?: number;
+  paidAmount?: number;
   billItems?: {
     lineId: string;
     productId: string;
@@ -62,6 +72,8 @@ type OrdersExecutor = {
   query<T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<T[]>;
 };
 
+type AdjustmentMode = 'percent' | 'amount';
+
 @Injectable()
 export class OrdersService {
   constructor(
@@ -76,6 +88,20 @@ export class OrdersService {
     return `HD${yy}${mm}${dd}`;
   }
 
+  private toMoney(value: unknown) {
+    return Math.max(0, Math.trunc(Number(value) || 0));
+  }
+
+  private toRawAdjustmentValue(value: unknown) {
+    const numeric = Math.max(0, Number(value) || 0);
+    return Number(numeric.toFixed(4));
+  }
+
+  private normalizeAdjustmentMode(value: unknown, fallback: AdjustmentMode = 'amount'): AdjustmentMode {
+    if (value === 'percent' || value === 'amount') return value;
+    return fallback;
+  }
+
   private async generateNextOrderCode(executor: OrdersExecutor, date: Date) {
     const prefix = this.buildOrderCodePrefix(date);
     const rows = await executor.query<{ nextSeq: string }>(
@@ -87,7 +113,7 @@ export class OrdersService {
 
   private async logAction(executor: OrdersExecutor, params: {
     orderId: string;
-    action: 'CREATE_DRAFT' | 'UPDATE_ORDER' | 'DELETE_ORDER' | 'PAY_PARTIAL' | 'PAY_FULL' | 'PRINT_ORDER';
+    action: 'CREATE_ORDER' | 'UPDATE_ORDER' | 'DELETE_ORDER' | 'PAY_PARTIAL' | 'PAY_FULL' | 'PRINT_ORDER';
     detail?: string;
     snapshot?: unknown;
     userId: string;
@@ -111,8 +137,8 @@ export class OrdersService {
     return rows
       .map((item) => {
         const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
-        const baseUnitPrice = Math.max(0, Number(item.baseUnitPrice ?? item.unitPrice) || 0);
-        const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
+        const baseUnitPrice = this.toMoney(item.baseUnitPrice ?? item.unitPrice);
+        const unitPrice = this.toMoney(item.unitPrice);
         const lineTotal = quantity * unitPrice;
         return {
           lineId: item.lineId,
@@ -202,7 +228,7 @@ export class OrdersService {
       "finalAmount": string;
       "paidAmount": string;
       "creatorName": string | null;
-      orderState: 'DRAFT' | 'PAID' | 'DELETED' | 'PARTIAL';
+      orderState: 'PAID' | 'DELETED' | 'PARTIAL';
       "createdAt": string;
     }>(
       `SELECT od.id,
@@ -252,9 +278,9 @@ export class OrdersService {
       code: row.code,
       tableName: locationParts.length > 0 ? locationParts.join(' / ') : '-',
       customerName: row.customerName,
-      totalAmount: Number(row.totalAmount || 0),
-      finalAmount: Number(row.finalAmount || 0),
-      paidAmount: Number(row.paidAmount || 0),
+      totalAmount: this.toMoney(row.totalAmount),
+      finalAmount: this.toMoney(row.finalAmount),
+      paidAmount: this.toMoney(row.paidAmount),
       creatorName: row.creatorName || '-',
       orderState: row.orderState,
       createdAt: row.createdAt,
@@ -304,22 +330,34 @@ export class OrdersService {
     const billItems = this.normalizeOrderItems(input.billItems);
     if (billItems.length === 0) throw new BadRequestException('Hóa đơn phải có ít nhất một món');
     const subtotalAmount = billItems.reduce((sum, item) => sum + item.lineTotal, 0);
-    const discountAmount = Math.min(subtotalAmount, Math.max(0, Number(input.discountAmount) || 0));
-    const surchargeAmount = Math.max(0, Number(input.surchargeAmount) || 0);
+    const discountMode = this.normalizeAdjustmentMode(input.discountMode, 'amount');
+    const surchargeMode = this.normalizeAdjustmentMode(input.surchargeMode, 'amount');
+    const discountValue = this.toRawAdjustmentValue(input.discountValue ?? input.discountAmount);
+    const surchargeValue = this.toRawAdjustmentValue(input.surchargeValue ?? input.surchargeAmount);
+    const discountAmount = discountMode === 'percent'
+      ? this.toMoney(Math.min(subtotalAmount, (subtotalAmount * discountValue) / 100))
+      : Math.min(subtotalAmount, this.toMoney(discountValue));
+    const subtotalAfterDiscount = Math.max(0, subtotalAmount - discountAmount);
+    const surchargeAmount = surchargeMode === 'percent'
+      ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
+      : this.toMoney(surchargeValue);
     const totalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
 
     const id = randomUUID();
     let orderCode = '';
-    const paidAmount = 0;
+    const normalizedPaidAmount = this.toMoney(input.paidAmount);
+    const paidAmount = Math.min(normalizedPaidAmount, totalAmount);
+    const orderState = paidAmount >= totalAmount ? 'PAID' : 'PARTIAL';
+
     await this.db.withTransaction(async (tx) => {
       orderCode = await this.generateNextOrderCode(tx, new Date());
 
       await tx.query(
          `INSERT INTO orders (
-           id, "orderCode", "tableId", "userId", "totalAmount", "discountAmount", "surchargeAmount", "finalAmount",
-          "orderState", "customerName", "paidAmount", "branchId", "roomId", "createdAt", "updatedAt"
+           id, "orderCode", "tableId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount",
+           "orderState", "customerName", "paidAmount", "branchId", "roomId", "createdAt", "updatedAt"
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::"OrderLifecycleState", $10, $11, $12, $13, NOW(), NOW())`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7::"OrderAdjustmentMode", $8, $9, $10::"OrderAdjustmentMode", $11, $12, $13::"OrderLifecycleState", $14, $15, $16, $17, NOW(), NOW())`,
         [
           id,
           orderCode,
@@ -327,9 +365,13 @@ export class OrdersService {
         user.id,
           subtotalAmount,
           discountAmount,
+          discountMode,
+          discountValue,
           surchargeAmount,
+          surchargeMode,
+          surchargeValue,
           totalAmount,
-          'DRAFT',
+          orderState,
           input.customerName || null,
           paidAmount,
           branchId,
@@ -341,13 +383,19 @@ export class OrdersService {
 
       await this.logAction(tx, {
         orderId: id,
-        action: 'CREATE_DRAFT',
-        detail: 'Lưu nháp hóa đơn',
+        action: 'CREATE_ORDER',
+        detail: 'Tạo hóa đơn',
         snapshot: {
           subtotalAmount,
           discountAmount,
+          discountMode,
+          discountValue,
           surchargeAmount,
+          surchargeMode,
+          surchargeValue,
           totalAmount,
+          paidAmount,
+          orderState,
           itemCount: billItems.length,
           customerName: input.customerName || null,
         },
@@ -369,11 +417,15 @@ export class OrdersService {
       roomName: string | null;
       customerName: string | null;
       discountAmount: string;
+      discountMode: AdjustmentMode;
+      discountValue: string;
       surchargeAmount: string;
+      surchargeMode: AdjustmentMode;
+      surchargeValue: string;
       totalAmount: string;
       finalAmount: string;
       paidAmount: string;
-      orderState: 'DRAFT' | 'PAID' | 'DELETED' | 'PARTIAL';
+      orderState: 'PAID' | 'DELETED' | 'PARTIAL';
       branchId: string | null;
       createdAt: string;
     }>(
@@ -386,7 +438,11 @@ export class OrdersService {
               COALESCE(r.name, rr.name) AS "roomName",
               od."customerName" AS "customerName",
               od."discountAmount"::text AS "discountAmount",
+              od."discountMode"::text AS "discountMode",
+              od."discountValue"::text AS "discountValue",
               od."surchargeAmount"::text AS "surchargeAmount",
+              od."surchargeMode"::text AS "surchargeMode",
+              od."surchargeValue"::text AS "surchargeValue",
               od."totalAmount"::text AS "totalAmount",
               od."finalAmount"::text AS "finalAmount",
               od."paidAmount"::text AS "paidAmount",
@@ -443,16 +499,20 @@ export class OrdersService {
       tableName: rows[0].tableName,
       locationLabel: locationParts.join(' / '),
       customerName: rows[0].customerName,
-      discountAmount: Number(rows[0].discountAmount || 0),
-      surchargeAmount: Number(rows[0].surchargeAmount || 0),
-      totalAmount: Number(rows[0].totalAmount || 0),
-      finalAmount: Number(rows[0].finalAmount || 0),
-      paidAmount: Number(rows[0].paidAmount || 0),
+      discountAmount: this.toMoney(rows[0].discountAmount),
+      discountMode: this.normalizeAdjustmentMode(rows[0].discountMode, 'amount'),
+      discountValue: this.toRawAdjustmentValue(rows[0].discountValue),
+      surchargeAmount: this.toMoney(rows[0].surchargeAmount),
+      surchargeMode: this.normalizeAdjustmentMode(rows[0].surchargeMode, 'amount'),
+      surchargeValue: this.toRawAdjustmentValue(rows[0].surchargeValue),
+      totalAmount: this.toMoney(rows[0].totalAmount),
+      finalAmount: this.toMoney(rows[0].finalAmount),
+      paidAmount: this.toMoney(rows[0].paidAmount),
       orderState: rows[0].orderState,
       createdAt: rows[0].createdAt,
       items: itemRows.map((item) => {
-        const baseUnitPrice = Number(item.baseUnitPrice || 0);
-        const unitPrice = Number(item.unitPrice || 0);
+         const baseUnitPrice = this.toMoney(item.baseUnitPrice);
+         const unitPrice = this.toMoney(item.unitPrice);
         const quantity = Number(item.quantity || 0);
         const baseAmount = baseUnitPrice * quantity;
         const actualAmount = unitPrice * quantity;
@@ -478,15 +538,21 @@ export class OrdersService {
     const rows = await this.db.query<{
       id: string;
       "branchId": string | null;
+      "customerName": string | null;
       "orderState": string;
+      "paidAmount": string;
       "finalAmount": string;
       "totalAmount": string;
       "discountAmount": string;
+      "discountMode": AdjustmentMode;
+      "discountValue": string;
       "surchargeAmount": string;
+      "surchargeMode": AdjustmentMode;
+      "surchargeValue": string;
       "tableId": string | null;
       "roomId": string | null;
     }>(
-      'SELECT id, "branchId", "orderState", "finalAmount", "totalAmount", "discountAmount", "surchargeAmount", "tableId", "roomId" FROM orders WHERE id = $1 LIMIT 1',
+      'SELECT id, "branchId", "customerName", "orderState", "paidAmount", "finalAmount", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "tableId", "roomId" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
@@ -526,14 +592,87 @@ export class OrdersService {
     const normalizedItems = input.billItems === undefined ? undefined : this.normalizeOrderItems(input.billItems);
     const nextSubtotal = normalizedItems
       ? normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0)
-      : Number(rows[0].totalAmount || 0);
-    const nextDiscountAmount = input.discountAmount === undefined
-      ? Number(rows[0].discountAmount || 0)
-      : Math.min(nextSubtotal, Math.max(0, Number(input.discountAmount) || 0));
-    const nextSurchargeAmount = input.surchargeAmount === undefined
-      ? Number(rows[0].surchargeAmount || 0)
-      : Math.max(0, Number(input.surchargeAmount) || 0);
+      : this.toMoney(rows[0].totalAmount);
+    const currentDiscountMode = this.normalizeAdjustmentMode(rows[0].discountMode, 'amount');
+    const currentSurchargeMode = this.normalizeAdjustmentMode(rows[0].surchargeMode, 'amount');
+
+    const nextDiscountMode = this.normalizeAdjustmentMode(
+      input.discountMode,
+      input.discountAmount !== undefined && input.discountValue === undefined ? 'amount' : currentDiscountMode,
+    );
+    const nextSurchargeMode = this.normalizeAdjustmentMode(
+      input.surchargeMode,
+      input.surchargeAmount !== undefined && input.surchargeValue === undefined ? 'amount' : currentSurchargeMode,
+    );
+
+    const nextDiscountValue = this.toRawAdjustmentValue(
+      input.discountValue ?? input.discountAmount ?? rows[0].discountValue,
+    );
+    const nextSurchargeValue = this.toRawAdjustmentValue(
+      input.surchargeValue ?? input.surchargeAmount ?? rows[0].surchargeValue,
+    );
+
+    const nextDiscountAmount = nextDiscountMode === 'percent'
+      ? this.toMoney(Math.min(nextSubtotal, (nextSubtotal * nextDiscountValue) / 100))
+      : Math.min(nextSubtotal, this.toMoney(nextDiscountValue));
+    const nextSubtotalAfterDiscount = Math.max(0, nextSubtotal - nextDiscountAmount);
+    const nextSurchargeAmount = nextSurchargeMode === 'percent'
+      ? this.toMoney((nextSubtotalAfterDiscount * nextSurchargeValue) / 100)
+      : this.toMoney(nextSurchargeValue);
     const nextTotal = Math.max(0, nextSubtotal - nextDiscountAmount + nextSurchargeAmount);
+    const nextPaidAmount = input.paidAmount === undefined
+      ? this.toMoney(rows[0].paidAmount)
+      : this.toMoney(input.paidAmount);
+    const nextOrderState = nextPaidAmount >= nextTotal ? 'PAID' : 'PARTIAL';
+
+    const formatMoney = (value: number) => this.toMoney(value).toLocaleString('vi-VN');
+    const stateLabel = (state: string) => {
+      if (state === 'PAID') return 'Đã thanh toán';
+      if (state === 'PARTIAL') return 'Chưa trả hết';
+      if (state === 'DELETED') return 'Đã xóa';
+      return state;
+    };
+
+    const changeMessages: string[] = [];
+    const previousCustomerName = rows[0].customerName ?? '';
+    const nextCustomerName = input.customerName ?? previousCustomerName;
+    if (nextCustomerName !== previousCustomerName) {
+      changeMessages.push(`khách hàng: ${previousCustomerName || '-'} -> ${nextCustomerName || '-'}`);
+    }
+    if (nextSubtotal !== this.toMoney(rows[0].totalAmount)) {
+      changeMessages.push(`tạm tính: ${formatMoney(this.toMoney(rows[0].totalAmount))} -> ${formatMoney(nextSubtotal)}`);
+    }
+    if (nextDiscountAmount !== this.toMoney(rows[0].discountAmount)) {
+      changeMessages.push(`giảm giá: ${formatMoney(this.toMoney(rows[0].discountAmount))} -> ${formatMoney(nextDiscountAmount)}`);
+    }
+    if (nextDiscountMode !== currentDiscountMode || nextDiscountValue !== this.toRawAdjustmentValue(rows[0].discountValue)) {
+      changeMessages.push(`kiểu giảm giá: ${currentDiscountMode}(${this.toRawAdjustmentValue(rows[0].discountValue)}) -> ${nextDiscountMode}(${nextDiscountValue})`);
+    }
+    if (nextSurchargeAmount !== this.toMoney(rows[0].surchargeAmount)) {
+      changeMessages.push(`phụ phí: ${formatMoney(this.toMoney(rows[0].surchargeAmount))} -> ${formatMoney(nextSurchargeAmount)}`);
+    }
+    if (nextSurchargeMode !== currentSurchargeMode || nextSurchargeValue !== this.toRawAdjustmentValue(rows[0].surchargeValue)) {
+      changeMessages.push(`kiểu phụ phí: ${currentSurchargeMode}(${this.toRawAdjustmentValue(rows[0].surchargeValue)}) -> ${nextSurchargeMode}(${nextSurchargeValue})`);
+    }
+    if (nextTotal !== this.toMoney(rows[0].finalAmount)) {
+      changeMessages.push(`phải thanh toán: ${formatMoney(this.toMoney(rows[0].finalAmount))} -> ${formatMoney(nextTotal)}`);
+    }
+    if (nextPaidAmount !== this.toMoney(rows[0].paidAmount)) {
+      changeMessages.push(`khách thanh toán: ${formatMoney(this.toMoney(rows[0].paidAmount))} -> ${formatMoney(nextPaidAmount)}`);
+    }
+    if (nextOrderState !== rows[0].orderState) {
+      changeMessages.push(`trạng thái: ${stateLabel(rows[0].orderState)} -> ${stateLabel(nextOrderState)}`);
+    }
+    if (resolvedTableId !== rows[0].tableId || resolvedRoomId !== rows[0].roomId) {
+      changeMessages.push('phòng/bàn: đã thay đổi');
+    }
+    if (normalizedItems) {
+      changeMessages.push(`danh sách món: ${normalizedItems.length} dòng`);
+    }
+
+    const updateDetail = changeMessages.length
+      ? `Cập nhật hóa đơn: ${changeMessages.join('; ')}`
+      : 'Cập nhật hóa đơn';
 
     await this.db.withTransaction(async (tx) => {
       await tx.query(
@@ -541,13 +680,34 @@ export class OrdersService {
        SET "customerName" = COALESCE($2, "customerName"),
            "totalAmount" = $3,
            "discountAmount" = $4,
-           "surchargeAmount" = $5,
-           "finalAmount" = $6,
-           "tableId" = $7,
-           "roomId" = $8,
-           "updatedAt" = NOW()
+           "discountMode" = $5::"OrderAdjustmentMode",
+           "discountValue" = $6,
+           "surchargeAmount" = $7,
+           "surchargeMode" = $8::"OrderAdjustmentMode",
+           "surchargeValue" = $9,
+           "finalAmount" = $10,
+           "paidAmount" = $11,
+           "orderState" = $12::"OrderLifecycleState",
+           "tableId" = $13,
+           "roomId" = $14,
+             "updatedAt" = NOW()
        WHERE id = $1`,
-      [id, input.customerName ?? null, nextSubtotal, nextDiscountAmount, nextSurchargeAmount, nextTotal, resolvedTableId, resolvedRoomId],
+      [
+        id,
+        input.customerName ?? null,
+        nextSubtotal,
+        nextDiscountAmount,
+        nextDiscountMode,
+        nextDiscountValue,
+        nextSurchargeAmount,
+        nextSurchargeMode,
+        nextSurchargeValue,
+        nextTotal,
+        nextPaidAmount,
+        nextOrderState,
+        resolvedTableId,
+        resolvedRoomId,
+      ],
       );
 
       if (normalizedItems) {
@@ -557,13 +717,19 @@ export class OrdersService {
       await this.logAction(tx, {
         orderId: id,
         action: 'UPDATE_ORDER',
-        detail: 'Cập nhật hóa đơn',
+        detail: updateDetail,
         snapshot: {
           customerName: input.customerName ?? undefined,
           subtotalAmount: nextSubtotal,
           discountAmount: nextDiscountAmount,
+          discountMode: nextDiscountMode,
+          discountValue: nextDiscountValue,
           surchargeAmount: nextSurchargeAmount,
+          surchargeMode: nextSurchargeMode,
+          surchargeValue: nextSurchargeValue,
           totalAmount: nextTotal,
+          paidAmount: nextPaidAmount,
+          orderState: nextOrderState,
           itemCount: normalizedItems?.length,
         },
         userId: user.id,
@@ -625,37 +791,6 @@ export class OrdersService {
     );
 
     return logs;
-  }
-
-  async updatePayment(user: CurrentUser, id: string, paidAmount: number) {
-    const rows = await this.db.query<{ id: string; "branchId": string | null; "finalAmount": string }>(
-      'SELECT id, "branchId", "finalAmount" FROM orders WHERE id = $1 LIMIT 1',
-      [id],
-    );
-    if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
-    this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-
-    const normalizedPaid = Math.max(0, Number(paidAmount) || 0);
-    const totalAmount = Number(rows[0].finalAmount || 0);
-    const orderState = normalizedPaid >= totalAmount ? 'PAID' : 'PARTIAL';
-
-    await this.db.withTransaction(async (tx) => {
-      await tx.query('UPDATE orders SET "paidAmount" = $2, "orderState" = $3::"OrderLifecycleState", "updatedAt" = NOW() WHERE id = $1', [
-        id,
-        normalizedPaid,
-        orderState,
-      ]);
-
-      await this.logAction(tx, {
-        orderId: id,
-        action: orderState === 'PAID' ? 'PAY_FULL' : 'PAY_PARTIAL',
-        detail: `Thanh toán ${normalizedPaid.toLocaleString('vi-VN')}`,
-        snapshot: { paidAmount: normalizedPaid, totalAmount, orderState },
-        userId: user.id,
-      });
-    });
-
-    return { id, paidAmount: normalizedPaid, orderState };
   }
 
   async markDeleted(user: CurrentUser, id: string) {

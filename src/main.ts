@@ -5,9 +5,13 @@ import { json, urlencoded } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { PgService } from './database/pg.service';
+import { assertOrdersAdjustmentSchema, runMigrationsOrFail } from './database/schema-guard';
 import { seed } from './database/seed';
 
 async function bootstrap() {
+  runMigrationsOrFail();
+  await assertOrdersAdjustmentSchema();
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.setGlobalPrefix('api');
   app.enableCors();

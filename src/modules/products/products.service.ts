@@ -53,6 +53,10 @@ export class ProductsService {
     private readonly branchPolicy: BranchPolicyService,
   ) {}
 
+  private toMoney(value: unknown) {
+    return Math.max(0, Math.trunc(Number(value) || 0));
+  }
+
   async processAndSaveImage(file: Express.Multer.File) {
     const acceptedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
     if (!acceptedMimeTypes.includes(file.mimetype)) {
@@ -240,7 +244,12 @@ export class ProductsService {
     );
 
     const normalizedItems = (items as any[]).map((item) => {
-      if (!scopedBranchId) return item;
+      const baseItem = {
+        ...item,
+        price: this.toMoney(item.price),
+        costPrice: item.costPrice == null ? null : this.toMoney(item.costPrice),
+      };
+      if (!scopedBranchId) return baseItem;
       const rawConfigs = Array.isArray(item.branchConfigs)
         ? item.branchConfigs
         : typeof item.branchConfigs === 'string'
@@ -249,7 +258,7 @@ export class ProductsService {
       const filteredConfigs = rawConfigs.filter((cfg: any) => cfg?.branchId === scopedBranchId);
       const branchStock = filteredConfigs.reduce((sum: number, cfg: any) => sum + Number(cfg?.stock || 0), 0);
       return {
-        ...item,
+        ...baseItem,
         stock: branchStock,
         branchNames: filteredConfigs.map((cfg: any) => cfg.branchName).filter(Boolean).join(', '),
         branchConfigs: filteredConfigs,
@@ -332,12 +341,18 @@ export class ProductsService {
       const filteredConfigs = rawConfigs.filter((cfg: any) => cfg?.branchId === scopedBranchId);
       return {
         ...rows[0],
+        price: this.toMoney(rows[0].price),
+        costPrice: rows[0].costPrice == null ? null : this.toMoney(rows[0].costPrice),
         stock: filteredConfigs.reduce((sum: number, cfg: any) => sum + Number(cfg?.stock || 0), 0),
         branchConfigs: filteredConfigs,
       };
     }
 
-    return rows[0];
+    return {
+      ...rows[0],
+      price: this.toMoney(rows[0].price),
+      costPrice: rows[0].costPrice == null ? null : this.toMoney(rows[0].costPrice),
+    };
   }
 
   private async normalizeBranchConfigs(branchConfigs: BranchConfigInput[] | undefined, user: CurrentUser) {
@@ -404,12 +419,12 @@ export class ProductsService {
       throw new BadRequestException('Trọng lượng không hợp lệ');
     }
 
-    const costPrice = Number(input.costPrice ?? 0);
+    const costPrice = this.toMoney(input.costPrice);
     if (!Number.isFinite(costPrice) || costPrice < 0) {
       throw new BadRequestException('Giá vốn không hợp lệ');
     }
 
-    const price = Number(input.price);
+    const price = this.toMoney(input.price);
     if (!Number.isFinite(price) || price <= 0) {
       throw new BadRequestException('Giá bán phải lớn hơn 0');
     }
@@ -423,7 +438,7 @@ export class ProductsService {
     const uniqueMap = new Map<string, number>();
     for (const item of comboItems) {
       if (!item?.itemProductId) continue;
-      const quantity = Math.max(0, Math.floor(Number(item.quantity)));
+      const quantity = Math.max(0, Math.trunc(Number(item.quantity)));
       if (quantity <= 0) {
         throw new BadRequestException('Số lượng thành phần combo không hợp lệ');
       }
@@ -462,7 +477,7 @@ export class ProductsService {
     const normalized = itemIds.map((itemProductId) => ({
       itemProductId,
       quantity: uniqueMap.get(itemProductId) || 1,
-      itemPrice: Number(byId.get(itemProductId)?.price || 0),
+      itemPrice: this.toMoney(byId.get(itemProductId)?.price),
     }));
 
     const autoPrice = normalized.reduce((sum, item) => sum + item.itemPrice * item.quantity, 0);
@@ -486,7 +501,7 @@ export class ProductsService {
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
     let comboItemsPayload: { itemProductId: string; quantity: number; itemPrice: number }[] = [];
-    let finalPrice = Number(input.price);
+    let finalPrice = this.toMoney(input.price);
     if (productType === 'COMBO') {
       const comboPayload = await this.normalizeComboItems(input.comboItems, user);
       comboItemsPayload = comboPayload.normalized;
@@ -509,7 +524,7 @@ export class ProductsService {
         productType,
         productType === 'COMBO' ? input.autoPrice ?? true : false,
         finalPrice,
-        input.costPrice != null ? Number(input.costPrice) : null,
+        input.costPrice != null ? this.toMoney(input.costPrice) : null,
         input.categoryId || null,
         input.unit?.trim() || null,
         input.weight != null ? Number(input.weight) : null,
@@ -576,7 +591,7 @@ export class ProductsService {
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
     let comboItemsPayload: { itemProductId: string; quantity: number; itemPrice: number }[] = [];
-    let finalPrice = Number(input.price);
+    let finalPrice = this.toMoney(input.price);
     if (productType === 'COMBO') {
       const comboPayload = await this.normalizeComboItems(input.comboItems, user);
       comboItemsPayload = comboPayload.normalized.filter((item) => item.itemProductId !== id);
@@ -599,7 +614,7 @@ export class ProductsService {
         productType,
         productType === 'COMBO' ? input.autoPrice ?? true : false,
         finalPrice,
-        input.costPrice != null ? Number(input.costPrice) : null,
+        input.costPrice != null ? this.toMoney(input.costPrice) : null,
         input.categoryId || null,
         input.unit?.trim() || null,
         input.weight != null ? Number(input.weight) : null,

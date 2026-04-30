@@ -80,6 +80,7 @@ describe('Order payment state integration', () => {
         totalAmount: productPrice,
         discountAmount: 0,
         surchargeAmount: 0,
+        paidAmount: 0,
         billItems: [
           {
             lineId: 'line-1',
@@ -99,12 +100,6 @@ describe('Order payment state integration', () => {
     const orderId = createRes.body?.id as string;
     expect(orderId).toBeTruthy();
 
-    await request(app.getHttpServer())
-      .patch(`/orders/${orderId}/payment`)
-      .set('Authorization', `Bearer ${token}`)
-      .send({ paidAmount: 0 })
-      .expect(200);
-
     const detailRes = await request(app.getHttpServer())
       .get(`/orders/${orderId}`)
       .set('Authorization', `Bearer ${token}`)
@@ -112,5 +107,126 @@ describe('Order payment state integration', () => {
 
     expect(detailRes.body?.orderState).toBe('PARTIAL');
     expect(Number(detailRes.body?.paidAmount || 0)).toBe(0);
+  });
+
+  it('creates order and sets PAID when paidAmount covers finalAmount', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach test paid',
+        totalAmount: productPrice,
+        discountAmount: 0,
+        surchargeAmount: 0,
+        paidAmount: productPrice,
+        billItems: [
+          {
+            lineId: 'line-2',
+            productId,
+            productName,
+            unit: productUnit,
+            baseUnitPrice: productPrice,
+            unitPrice: productPrice,
+            quantity: 1,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = createRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    const detailRes = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(detailRes.body?.orderState).toBe('PAID');
+    expect(Number(detailRes.body?.paidAmount || 0)).toBe(productPrice);
+  });
+
+  it('persists discount/surcharge mode and raw values across create and update', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach test mode raw',
+        totalAmount: productPrice * 2,
+        discountMode: 'percent',
+        discountValue: 10,
+        surchargeMode: 'percent',
+        surchargeValue: 5,
+        paidAmount: 0,
+        billItems: [
+          {
+            lineId: 'line-3',
+            productId,
+            productName,
+            unit: productUnit,
+            baseUnitPrice: productPrice,
+            unitPrice: productPrice,
+            quantity: 2,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = createRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    const detailAfterCreate = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(detailAfterCreate.body?.discountMode).toBe('percent');
+    expect(Number(detailAfterCreate.body?.discountValue)).toBe(10);
+    expect(detailAfterCreate.body?.surchargeMode).toBe('percent');
+    expect(Number(detailAfterCreate.body?.surchargeValue)).toBe(5);
+
+    await request(app.getHttpServer())
+      .patch(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        discountMode: 'amount',
+        discountValue: 12000,
+        surchargeMode: 'amount',
+        surchargeValue: 6000,
+      })
+      .expect(200);
+
+    const detailAfterUpdate = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(detailAfterUpdate.body?.discountMode).toBe('amount');
+    expect(Number(detailAfterUpdate.body?.discountValue)).toBe(12000);
+    expect(detailAfterUpdate.body?.surchargeMode).toBe('amount');
+    expect(Number(detailAfterUpdate.body?.surchargeValue)).toBe(6000);
   });
 });
