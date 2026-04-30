@@ -7,11 +7,11 @@ WHERE "orderState"::text = 'DRAFT';
 
 UPDATE order_logs
 SET action = 'CREATE_ORDER'
-WHERE action = 'CREATE_DRAFT';
+WHERE action::text = 'CREATE_DRAFT';
 
 UPDATE order_logs
 SET action = 'CREATE_ORDER'
-WHERE action = 'CREATE';
+WHERE action::text = 'CREATE';
 
 DO $$
 BEGIN
