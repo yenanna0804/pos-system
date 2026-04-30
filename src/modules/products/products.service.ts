@@ -719,6 +719,12 @@ export class ProductsService {
       const removedItems = Number(removedRows[0]?.removedCount || '0');
 
       for (const order of impactedOrders) {
+        const itemCountRows = await tx.query<{ itemCount: string }>(
+          'SELECT COUNT(*)::text AS "itemCount" FROM order_items WHERE "orderId" = $1',
+          [order.orderId],
+        );
+        const itemCount = Number(itemCountRows[0]?.itemCount || '0');
+
         const subtotalRows = await tx.query<{ subtotal: string }>(
           'SELECT COALESCE(SUM("totalPrice"), 0)::text AS subtotal FROM order_items WHERE "orderId" = $1',
           [order.orderId],
@@ -738,7 +744,9 @@ export class ProductsService {
             : this.toMoney(surchargeValue);
         const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
         const paidAmount = Math.min(this.toMoney(order.paidAmount), finalAmount);
-        const nextOrderState = finalAmount > 0 && paidAmount >= finalAmount ? 'PAID' : 'PARTIAL';
+        const nextOrderState = itemCount === 0
+          ? 'DELETED'
+          : (finalAmount > 0 && paidAmount >= finalAmount ? 'PAID' : 'PARTIAL');
 
         await tx.query(
           `UPDATE orders
@@ -751,6 +759,31 @@ export class ProductsService {
                "updatedAt" = NOW()
            WHERE id = $1`,
           [order.orderId, subtotalAmount, discountAmount, surchargeAmount, finalAmount, paidAmount, nextOrderState],
+        );
+
+        await tx.query(
+          `INSERT INTO order_logs (id, "orderId", action, detail, snapshot, "createdBy", "createdAt")
+           VALUES ($1, $2, $3::"OrderLogAction", $4, CAST($5 AS jsonb), $6, NOW())`,
+          [
+            randomUUID(),
+            order.orderId,
+            nextOrderState === 'DELETED' ? 'DELETE_ORDER' : 'UPDATE_ORDER',
+            nextOrderState === 'DELETED'
+              ? 'Hệ thống tự động đánh dấu xóa hóa đơn do xóa hàng hóa làm trống hóa đơn'
+              : 'Hệ thống tự động cập nhật hóa đơn do xóa hàng hóa',
+            JSON.stringify({
+              source: 'PRODUCT_DELETE',
+              removedProductId: id,
+              subtotalAmount,
+              discountAmount,
+              surchargeAmount,
+              finalAmount,
+              paidAmount,
+              orderState: nextOrderState,
+              itemCount,
+            }),
+            user.id,
+          ],
         );
       }
 

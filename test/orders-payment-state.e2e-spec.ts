@@ -81,6 +81,7 @@ describe('Order payment state integration', () => {
         discountAmount: 0,
         surchargeAmount: 0,
         paidAmount: 0,
+        paymentMethod: 'CASH',
         billItems: [
           {
             lineId: 'line-1',
@@ -107,6 +108,7 @@ describe('Order payment state integration', () => {
 
     expect(detailRes.body?.orderState).toBe('PARTIAL');
     expect(Number(detailRes.body?.paidAmount || 0)).toBe(0);
+    expect(detailRes.body?.paymentMethod).toBe('CASH');
   });
 
   it('creates order and sets PAID when paidAmount covers finalAmount', async () => {
@@ -129,6 +131,7 @@ describe('Order payment state integration', () => {
         discountAmount: 0,
         surchargeAmount: 0,
         paidAmount: productPrice,
+        paymentMethod: 'BANKING',
         billItems: [
           {
             lineId: 'line-2',
@@ -155,6 +158,7 @@ describe('Order payment state integration', () => {
 
     expect(detailRes.body?.orderState).toBe('PAID');
     expect(Number(detailRes.body?.paidAmount || 0)).toBe(productPrice);
+    expect(detailRes.body?.paymentMethod).toBe('BANKING');
   });
 
   it('persists discount/surcharge mode and raw values across create and update', async () => {
@@ -179,6 +183,7 @@ describe('Order payment state integration', () => {
         surchargeMode: 'percent',
         surchargeValue: 5,
         paidAmount: 0,
+        paymentMethod: 'CASH',
         billItems: [
           {
             lineId: 'line-3',
@@ -207,6 +212,7 @@ describe('Order payment state integration', () => {
     expect(Number(detailAfterCreate.body?.discountValue)).toBe(10);
     expect(detailAfterCreate.body?.surchargeMode).toBe('percent');
     expect(Number(detailAfterCreate.body?.surchargeValue)).toBe(5);
+    expect(detailAfterCreate.body?.paymentMethod).toBe('CASH');
 
     await request(app.getHttpServer())
       .patch(`/orders/${orderId}`)
@@ -216,6 +222,7 @@ describe('Order payment state integration', () => {
         discountValue: 12000,
         surchargeMode: 'amount',
         surchargeValue: 6000,
+        paymentMethod: 'BANKING',
       })
       .expect(200);
 
@@ -228,5 +235,216 @@ describe('Order payment state integration', () => {
     expect(Number(detailAfterUpdate.body?.discountValue)).toBe(12000);
     expect(detailAfterUpdate.body?.surchargeMode).toBe('amount');
     expect(Number(detailAfterUpdate.body?.surchargeValue)).toBe(6000);
+    expect(detailAfterUpdate.body?.paymentMethod).toBe('BANKING');
+  });
+
+  it('marks order as DELETED when updated with empty bill items', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach update empty items',
+        totalAmount: productPrice,
+        discountAmount: 0,
+        surchargeAmount: 0,
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: 'line-empty-update-1',
+            productId,
+            productName,
+            unit: productUnit,
+            baseUnitPrice: productPrice,
+            unitPrice: productPrice,
+            quantity: 1,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = createRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    await request(app.getHttpServer())
+      .patch(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        billItems: [],
+      })
+      .expect(200);
+
+    const detailRes = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(detailRes.body?.orderState).toBe('DELETED');
+    expect(Array.isArray(detailRes.body?.items)).toBe(true);
+    expect(detailRes.body?.items?.length).toBe(0);
+  });
+
+  it('marks impacted order as DELETED when product deletion removes all items', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const productCreateRes = await request(app.getHttpServer())
+      .post('/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        type: 'SINGLE',
+        name: `E2E delete impact ${Date.now()}`,
+        price: 15000,
+        isActive: true,
+        branchConfigs: [{ branchId, isActive: true, stock: 10 }],
+      })
+      .expect(201);
+
+    const createdProductId = productCreateRes.body?.id as string;
+    expect(createdProductId).toBeTruthy();
+
+    const createdProductName = (productCreateRes.body?.name as string) || 'E2E item';
+    const createdProductUnit = (productCreateRes.body?.unit as string) || 'phan';
+    const createdProductPrice = Number(productCreateRes.body?.price || 15000);
+
+    const orderCreateRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach delete product impact',
+        totalAmount: createdProductPrice,
+        discountAmount: 0,
+        surchargeAmount: 0,
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: 'line-delete-impact-1',
+            productId: createdProductId,
+            productName: createdProductName,
+            unit: createdProductUnit,
+            baseUnitPrice: createdProductPrice,
+            unitPrice: createdProductPrice,
+            quantity: 1,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = orderCreateRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    await request(app.getHttpServer())
+      .delete(`/products/${createdProductId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    const detailRes = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(detailRes.body?.orderState).toBe('DELETED');
+    expect(Array.isArray(detailRes.body?.items)).toBe(true);
+    expect(detailRes.body?.items?.length).toBe(0);
+  });
+
+  it('writes order history log when product deletion auto-updates order', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const productCreateRes = await request(app.getHttpServer())
+      .post('/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        type: 'SINGLE',
+        name: `E2E history impact ${Date.now()}`,
+        price: 17000,
+        isActive: true,
+        branchConfigs: [{ branchId, isActive: true, stock: 10 }],
+      })
+      .expect(201);
+
+    const createdProductId = productCreateRes.body?.id as string;
+    expect(createdProductId).toBeTruthy();
+
+    const createdProductName = (productCreateRes.body?.name as string) || 'E2E item';
+    const createdProductUnit = (productCreateRes.body?.unit as string) || 'phan';
+    const createdProductPrice = Number(productCreateRes.body?.price || 17000);
+
+    const orderCreateRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach history product delete',
+        totalAmount: createdProductPrice,
+        discountAmount: 0,
+        surchargeAmount: 0,
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: 'line-history-impact-1',
+            productId: createdProductId,
+            productName: createdProductName,
+            unit: createdProductUnit,
+            baseUnitPrice: createdProductPrice,
+            unitPrice: createdProductPrice,
+            quantity: 1,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = orderCreateRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    await request(app.getHttpServer())
+      .delete(`/products/${createdProductId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    const logsRes = await request(app.getHttpServer())
+      .get(`/orders/${orderId}/logs`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    const logs = Array.isArray(logsRes.body) ? logsRes.body : [];
+    const autoLog = logs.find((log: { action?: string; detail?: string }) =>
+      (log.action === 'DELETE_ORDER' || log.action === 'UPDATE_ORDER')
+      && (log.detail || '').includes('xóa hàng hóa'),
+    );
+
+    expect(autoLog).toBeTruthy();
   });
 });

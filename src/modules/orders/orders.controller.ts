@@ -17,6 +17,7 @@ type CreateOrderDto = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
+  paymentMethod?: 'CASH' | 'BANKING';
   billItems: {
     lineId: string;
     productId: string;
@@ -43,6 +44,7 @@ type UpdateOrderDto = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
+  paymentMethod?: 'CASH' | 'BANKING';
   billItems?: {
     lineId: string;
     productId: string;
@@ -69,6 +71,7 @@ export class OrdersController {
     @Query('search') search?: string,
     @Query('orderStates') orderStates?: string,
     @Query('statuses') legacyStatuses?: string,
+    @Query('paymentMethod') paymentMethod?: 'CASH' | 'BANKING',
     @Query('areaId') areaId?: string,
     @Query('roomId') roomId?: string,
     @Query('tableId') tableId?: string,
@@ -83,6 +86,7 @@ export class OrdersController {
       orderStates: (orderStates || legacyStatuses)
         ? (orderStates || legacyStatuses)?.split(',').map((v) => v.trim()).filter(Boolean)
         : undefined,
+      paymentMethod,
       areaId,
       roomId,
       tableId,
@@ -119,5 +123,10 @@ export class OrdersController {
   @Delete('orders/:id')
   deleteOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.ordersService.markDeleted(user, id);
+  }
+
+  @Delete('orders/:id/hard')
+  hardDeleteOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.ordersService.hardDelete(user, id);
   }
 }

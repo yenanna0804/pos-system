@@ -18,6 +18,7 @@ type CreateOrderInput = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
+  paymentMethod?: 'CASH' | 'BANKING';
   billItems: {
     lineId: string;
     productId: string;
@@ -44,6 +45,7 @@ type UpdateOrderInput = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
+  paymentMethod?: 'CASH' | 'BANKING';
   billItems?: {
     lineId: string;
     productId: string;
@@ -73,6 +75,7 @@ type OrdersExecutor = {
 };
 
 type AdjustmentMode = 'percent' | 'amount';
+type PaymentMethod = 'CASH' | 'BANKING';
 
 @Injectable()
 export class OrdersService {
@@ -99,6 +102,11 @@ export class OrdersService {
 
   private normalizeAdjustmentMode(value: unknown, fallback: AdjustmentMode = 'amount'): AdjustmentMode {
     if (value === 'percent' || value === 'amount') return value;
+    return fallback;
+  }
+
+  private normalizePaymentMethod(value: unknown, fallback: PaymentMethod = 'CASH'): PaymentMethod {
+    if (value === 'CASH' || value === 'BANKING') return value;
     return fallback;
   }
 
@@ -172,6 +180,7 @@ export class OrdersService {
     pageSize?: number;
     search?: string;
     orderStates?: string[];
+    paymentMethod?: 'CASH' | 'BANKING';
     areaId?: string;
     roomId?: string;
     tableId?: string;
@@ -184,6 +193,7 @@ export class OrdersService {
     const offset = (page - 1) * pageSize;
     const search = params.search?.trim() || null;
     const orderStates = Array.isArray(params.orderStates) && params.orderStates.length > 0 ? params.orderStates : null;
+    const paymentMethod = params.paymentMethod ? this.normalizePaymentMethod(params.paymentMethod, 'CASH') : null;
     const areaId = params.areaId || null;
     const roomId = params.roomId || null;
     const tableId = params.tableId || null;
@@ -209,12 +219,13 @@ export class OrdersService {
             COALESCE(u."fullName", u.username, '') ILIKE CONCAT('%', $2, '%')
          ))
          AND ($3::text[] IS NULL OR od."orderState"::text = ANY($3))
-         AND ($4::text IS NULL OR COALESCE(a.id, ar.id) = $4)
-         AND ($5::text IS NULL OR COALESCE(r.id, rr.id) = $5)
-         AND ($6::text IS NULL OR t.id = $6)
-         AND ($7::timestamptz IS NULL OR od."createdAt" >= $7)
-         AND ($8::timestamptz IS NULL OR od."createdAt" <= $8)`,
-       [scopedBranchId || null, search, orderStates, areaId, roomId, tableId, startDateIso, endDateIso],
+          AND ($4::"PaymentMethod" IS NULL OR od."paymentMethod" = $4)
+          AND ($5::text IS NULL OR COALESCE(a.id, ar.id) = $5)
+          AND ($6::text IS NULL OR COALESCE(r.id, rr.id) = $6)
+          AND ($7::text IS NULL OR t.id = $7)
+          AND ($8::timestamptz IS NULL OR od."createdAt" >= $8)
+          AND ($9::timestamptz IS NULL OR od."createdAt" <= $9)`,
+        [scopedBranchId || null, search, orderStates, paymentMethod, areaId, roomId, tableId, startDateIso, endDateIso],
     );
     const total = Number(countRows[0]?.total || 0);
     const rows = await this.db.query<{
@@ -227,6 +238,7 @@ export class OrdersService {
       "totalAmount": string;
       "finalAmount": string;
       "paidAmount": string;
+      "paymentMethod": PaymentMethod | null;
       "creatorName": string | null;
       orderState: 'PAID' | 'DELETED' | 'PARTIAL';
       "createdAt": string;
@@ -239,8 +251,9 @@ export class OrdersService {
               od."customerName",
               od."totalAmount"::text AS "totalAmount",
               od."finalAmount"::text AS "finalAmount",
-              od."paidAmount"::text AS "paidAmount",
-              COALESCE(NULLIF(u."fullName", ''), u.username, od."userId") AS "creatorName",
+               od."paidAmount"::text AS "paidAmount",
+               od."paymentMethod"::text AS "paymentMethod",
+               COALESCE(NULLIF(u."fullName", ''), u.username, od."userId") AS "creatorName",
               od."orderState" AS "orderState",
               od."createdAt"
        FROM orders od
@@ -260,14 +273,15 @@ export class OrdersService {
             COALESCE(u."fullName", u.username, '') ILIKE CONCAT('%', $2, '%')
          ))
          AND ($3::text[] IS NULL OR od."orderState"::text = ANY($3))
-         AND ($4::text IS NULL OR COALESCE(a.id, ar.id) = $4)
-         AND ($5::text IS NULL OR COALESCE(r.id, rr.id) = $5)
-         AND ($6::text IS NULL OR t.id = $6)
-         AND ($7::timestamptz IS NULL OR od."createdAt" >= $7)
-         AND ($8::timestamptz IS NULL OR od."createdAt" <= $8)
-       ORDER BY od."createdAt" DESC
-       LIMIT $9 OFFSET $10`,
-       [scopedBranchId || null, search, orderStates, areaId, roomId, tableId, startDateIso, endDateIso, pageSize, offset],
+          AND ($4::"PaymentMethod" IS NULL OR od."paymentMethod" = $4)
+          AND ($5::text IS NULL OR COALESCE(a.id, ar.id) = $5)
+          AND ($6::text IS NULL OR COALESCE(r.id, rr.id) = $6)
+          AND ($7::text IS NULL OR t.id = $7)
+          AND ($8::timestamptz IS NULL OR od."createdAt" >= $8)
+          AND ($9::timestamptz IS NULL OR od."createdAt" <= $9)
+        ORDER BY od."createdAt" DESC
+        LIMIT $10 OFFSET $11`,
+        [scopedBranchId || null, search, orderStates, paymentMethod, areaId, roomId, tableId, startDateIso, endDateIso, pageSize, offset],
     );
 
     return {
@@ -281,6 +295,7 @@ export class OrdersService {
       totalAmount: this.toMoney(row.totalAmount),
       finalAmount: this.toMoney(row.finalAmount),
       paidAmount: this.toMoney(row.paidAmount),
+      paymentMethod: row.paymentMethod,
       creatorName: row.creatorName || '-',
       orderState: row.orderState,
       createdAt: row.createdAt,
@@ -347,6 +362,7 @@ export class OrdersService {
     let orderCode = '';
     const normalizedPaidAmount = this.toMoney(input.paidAmount);
     const paidAmount = Math.min(normalizedPaidAmount, totalAmount);
+    const paymentMethod = this.normalizePaymentMethod(input.paymentMethod, 'CASH');
     const orderState = paidAmount >= totalAmount ? 'PAID' : 'PARTIAL';
 
     await this.db.withTransaction(async (tx) => {
@@ -355,9 +371,9 @@ export class OrdersService {
       await tx.query(
          `INSERT INTO orders (
            id, "orderCode", "tableId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount",
-           "orderState", "customerName", "paidAmount", "branchId", "roomId", "createdAt", "updatedAt"
+            "orderState", "customerName", "paidAmount", "paymentMethod", "branchId", "roomId", "createdAt", "updatedAt"
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::"OrderAdjustmentMode", $8, $9, $10::"OrderAdjustmentMode", $11, $12, $13::"OrderLifecycleState", $14, $15, $16, $17, NOW(), NOW())`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7::"OrderAdjustmentMode", $8, $9, $10::"OrderAdjustmentMode", $11, $12, $13::"OrderLifecycleState", $14, $15, $16::"PaymentMethod", $17, $18, NOW(), NOW())`,
         [
           id,
           orderCode,
@@ -374,6 +390,7 @@ export class OrdersService {
           orderState,
           input.customerName || null,
           paidAmount,
+          paymentMethod,
           branchId,
           input.entityType === 'ROOM' ? input.roomId || null : null,
         ],
@@ -395,6 +412,7 @@ export class OrdersService {
           surchargeValue,
           totalAmount,
           paidAmount,
+          paymentMethod,
           orderState,
           itemCount: billItems.length,
           customerName: input.customerName || null,
@@ -425,6 +443,7 @@ export class OrdersService {
       totalAmount: string;
       finalAmount: string;
       paidAmount: string;
+      paymentMethod: PaymentMethod | null;
       orderState: 'PAID' | 'DELETED' | 'PARTIAL';
       branchId: string | null;
       createdAt: string;
@@ -445,8 +464,9 @@ export class OrdersService {
               od."surchargeValue"::text AS "surchargeValue",
               od."totalAmount"::text AS "totalAmount",
               od."finalAmount"::text AS "finalAmount",
-              od."paidAmount"::text AS "paidAmount",
-              od."orderState" AS "orderState",
+               od."paidAmount"::text AS "paidAmount",
+               od."paymentMethod"::text AS "paymentMethod",
+               od."orderState" AS "orderState",
               od."branchId" AS "branchId",
               od."createdAt"
        FROM orders od
@@ -508,6 +528,7 @@ export class OrdersService {
       totalAmount: this.toMoney(rows[0].totalAmount),
       finalAmount: this.toMoney(rows[0].finalAmount),
       paidAmount: this.toMoney(rows[0].paidAmount),
+      paymentMethod: rows[0].paymentMethod,
       orderState: rows[0].orderState,
       createdAt: rows[0].createdAt,
       items: itemRows.map((item) => {
@@ -541,6 +562,7 @@ export class OrdersService {
       "customerName": string | null;
       "orderState": string;
       "paidAmount": string;
+      "paymentMethod": PaymentMethod | null;
       "finalAmount": string;
       "totalAmount": string;
       "discountAmount": string;
@@ -552,7 +574,7 @@ export class OrdersService {
       "tableId": string | null;
       "roomId": string | null;
     }>(
-      'SELECT id, "branchId", "customerName", "orderState", "paidAmount", "finalAmount", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "tableId", "roomId" FROM orders WHERE id = $1 LIMIT 1',
+      'SELECT id, "branchId", "customerName", "orderState", "paidAmount", "paymentMethod", "finalAmount", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "tableId", "roomId" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
@@ -623,7 +645,11 @@ export class OrdersService {
     const nextPaidAmount = input.paidAmount === undefined
       ? this.toMoney(rows[0].paidAmount)
       : this.toMoney(input.paidAmount);
-    const nextOrderState = nextPaidAmount >= nextTotal ? 'PAID' : 'PARTIAL';
+    const nextPaymentMethod = input.paymentMethod === undefined
+      ? this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH')
+      : this.normalizePaymentMethod(input.paymentMethod, 'CASH');
+    const shouldSoftDelete = normalizedItems !== undefined && normalizedItems.length === 0;
+    const nextOrderState = shouldSoftDelete ? 'DELETED' : (nextPaidAmount >= nextTotal ? 'PAID' : 'PARTIAL');
 
     const formatMoney = (value: number) => this.toMoney(value).toLocaleString('vi-VN');
     const stateLabel = (state: string) => {
@@ -637,7 +663,7 @@ export class OrdersService {
     const previousCustomerName = rows[0].customerName ?? '';
     const nextCustomerName = input.customerName ?? previousCustomerName;
     if (nextCustomerName !== previousCustomerName) {
-      changeMessages.push(`khách hàng: ${previousCustomerName || '-'} -> ${nextCustomerName || '-'}`);
+      changeMessages.push(`Tên khách hàng: ${previousCustomerName || '-'} -> ${nextCustomerName || '-'}`);
     }
     if (nextSubtotal !== this.toMoney(rows[0].totalAmount)) {
       changeMessages.push(`tạm tính: ${formatMoney(this.toMoney(rows[0].totalAmount))} -> ${formatMoney(nextSubtotal)}`);
@@ -660,6 +686,9 @@ export class OrdersService {
     if (nextPaidAmount !== this.toMoney(rows[0].paidAmount)) {
       changeMessages.push(`khách thanh toán: ${formatMoney(this.toMoney(rows[0].paidAmount))} -> ${formatMoney(nextPaidAmount)}`);
     }
+    if (nextPaymentMethod !== this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH')) {
+      changeMessages.push(`phương thức thanh toán: ${this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH')} -> ${nextPaymentMethod}`);
+    }
     if (nextOrderState !== rows[0].orderState) {
       changeMessages.push(`trạng thái: ${stateLabel(rows[0].orderState)} -> ${stateLabel(nextOrderState)}`);
     }
@@ -670,9 +699,9 @@ export class OrdersService {
       changeMessages.push(`danh sách món: ${normalizedItems.length} dòng`);
     }
 
-    const updateDetail = changeMessages.length
-      ? `Cập nhật hóa đơn: ${changeMessages.join('; ')}`
-      : 'Cập nhật hóa đơn';
+    const updateDetail = shouldSoftDelete
+      ? 'Đánh dấu xóa hóa đơn do không còn món'
+      : (changeMessages.length ? `Cập nhật hóa đơn: ${changeMessages.join('; ')}` : 'Cập nhật hóa đơn');
 
     await this.db.withTransaction(async (tx) => {
       await tx.query(
@@ -687,11 +716,12 @@ export class OrdersService {
            "surchargeValue" = $9,
            "finalAmount" = $10,
            "paidAmount" = $11,
-           "orderState" = $12::"OrderLifecycleState",
-           "tableId" = $13,
-           "roomId" = $14,
-             "updatedAt" = NOW()
-       WHERE id = $1`,
+           "paymentMethod" = $12::"PaymentMethod",
+           "orderState" = $13::"OrderLifecycleState",
+           "tableId" = $14,
+           "roomId" = $15,
+              "updatedAt" = NOW()
+        WHERE id = $1`,
       [
         id,
         input.customerName ?? null,
@@ -704,6 +734,7 @@ export class OrdersService {
         nextSurchargeValue,
         nextTotal,
         nextPaidAmount,
+        nextPaymentMethod,
         nextOrderState,
         resolvedTableId,
         resolvedRoomId,
@@ -716,7 +747,7 @@ export class OrdersService {
 
       await this.logAction(tx, {
         orderId: id,
-        action: 'UPDATE_ORDER',
+        action: shouldSoftDelete ? 'DELETE_ORDER' : 'UPDATE_ORDER',
         detail: updateDetail,
         snapshot: {
           customerName: input.customerName ?? undefined,
@@ -729,6 +760,7 @@ export class OrdersService {
           surchargeValue: nextSurchargeValue,
           totalAmount: nextTotal,
           paidAmount: nextPaidAmount,
+          paymentMethod: nextPaymentMethod,
           orderState: nextOrderState,
           itemCount: normalizedItems?.length,
         },
@@ -814,6 +846,19 @@ export class OrdersService {
         userId: user.id,
       });
     });
+
+    return { success: true };
+  }
+
+  async hardDelete(user: CurrentUser, id: string) {
+    const rows = await this.db.query<{ id: string; "branchId": string | null }>(
+      'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
+      [id],
+    );
+    if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+
+    await this.db.query('DELETE FROM orders WHERE id = $1', [id]);
 
     return { success: true };
   }
