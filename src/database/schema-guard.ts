@@ -1,4 +1,3 @@
-import { execSync } from 'child_process';
 import { Client } from 'pg';
 
 const REQUIRED_ORDER_COLUMNS = [
@@ -28,11 +27,4 @@ export async function assertOrdersAdjustmentSchema() {
   } finally {
     await client.end();
   }
-}
-
-export function runMigrationsOrFail() {
-  execSync('npm run migrate:deploy', {
-    stdio: 'inherit',
-    env: process.env,
-  });
 }
