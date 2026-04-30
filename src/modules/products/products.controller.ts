@@ -75,6 +75,11 @@ export class ProductsController {
     return this.productsService.getProductById(id, user);
   }
 
+  @Get('products/:id/delete-impact')
+  getProductDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.productsService.getProductDeleteImpact(id, user);
+  }
+
   @Post('products')
   createProduct(@CurrentUser() user: CurrentUserType, @Body() dto: CreateProductDto) {
     return this.productsService.createProduct(dto, user);

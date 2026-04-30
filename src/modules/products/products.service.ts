@@ -46,6 +46,14 @@ type UpdateCategoryInput = {
   name: string;
 };
 
+type ProductDeleteImpactOrder = {
+  orderId: string;
+  orderCode: string;
+  orderState: 'PARTIAL' | 'PAID' | 'DELETED';
+  createdAt: string;
+  itemCount: number;
+};
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -676,17 +684,127 @@ export class ProductsService {
       }
     }
 
-    const orderRefs = await this.db.query<{ count: string }>(
-      'SELECT COUNT(*)::text AS count FROM order_items WHERE "productId" = $1',
+    const result = await this.db.withTransaction(async (tx) => {
+      const impactedOrders = await tx.query<{
+        orderId: string;
+        orderState: 'PARTIAL' | 'PAID' | 'DELETED';
+        paidAmount: string;
+        discountMode: 'percent' | 'amount';
+        discountValue: string;
+        surchargeMode: 'percent' | 'amount';
+        surchargeValue: string;
+      }>(
+        `SELECT DISTINCT od.id AS "orderId",
+                        od."orderState" AS "orderState",
+                        od."paidAmount"::text AS "paidAmount",
+                        od."discountMode"::text AS "discountMode",
+                        od."discountValue"::text AS "discountValue",
+                        od."surchargeMode"::text AS "surchargeMode",
+                        od."surchargeValue"::text AS "surchargeValue"
+         FROM orders od
+         INNER JOIN order_items oi ON oi."orderId" = od.id
+         WHERE oi."productId" = $1`,
+        [id],
+      );
+
+      const removedRows = await tx.query<{ removedCount: string }>(
+        `WITH deleted_rows AS (
+           DELETE FROM order_items
+           WHERE "productId" = $1
+           RETURNING id
+         )
+         SELECT COUNT(*)::text AS "removedCount" FROM deleted_rows`,
+        [id],
+      );
+      const removedItems = Number(removedRows[0]?.removedCount || '0');
+
+      for (const order of impactedOrders) {
+        const subtotalRows = await tx.query<{ subtotal: string }>(
+          'SELECT COALESCE(SUM("totalPrice"), 0)::text AS subtotal FROM order_items WHERE "orderId" = $1',
+          [order.orderId],
+        );
+        const subtotalAmount = this.toMoney(subtotalRows[0]?.subtotal || 0);
+
+        const discountValue = Math.max(0, Number(order.discountValue || 0));
+        const surchargeValue = Math.max(0, Number(order.surchargeValue || 0));
+        const discountAmount =
+          order.discountMode === 'percent'
+            ? this.toMoney(Math.min(subtotalAmount, (subtotalAmount * discountValue) / 100))
+            : Math.min(subtotalAmount, this.toMoney(discountValue));
+        const subtotalAfterDiscount = Math.max(0, subtotalAmount - discountAmount);
+        const surchargeAmount =
+          order.surchargeMode === 'percent'
+            ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
+            : this.toMoney(surchargeValue);
+        const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
+        const paidAmount = Math.min(this.toMoney(order.paidAmount), finalAmount);
+        const nextOrderState = finalAmount > 0 && paidAmount >= finalAmount ? 'PAID' : 'PARTIAL';
+
+        await tx.query(
+          `UPDATE orders
+           SET "totalAmount" = $2,
+               "discountAmount" = $3,
+               "surchargeAmount" = $4,
+               "finalAmount" = $5,
+               "paidAmount" = $6,
+               "orderState" = $7::"OrderLifecycleState",
+               "updatedAt" = NOW()
+           WHERE id = $1`,
+          [order.orderId, subtotalAmount, discountAmount, surchargeAmount, finalAmount, paidAmount, nextOrderState],
+        );
+      }
+
+      await tx.query('UPDATE products SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1', [id]);
+
+      return {
+        affectedOrders: impactedOrders.length,
+        removedItems,
+      };
+    });
+
+    return {
+      success: true,
+      ...result,
+    };
+  }
+
+  async getProductDeleteImpact(id: string, user: CurrentUser) {
+    const existed = await this.db.query<{ id: string }>(
+      'SELECT id FROM products WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
       [id],
     );
-    if (Number(orderRefs[0]?.count || '0') > 0) {
-      throw new BadRequestException('Hàng hóa đã có trong hóa đơn, không thể xóa');
+    if (!existed[0]) {
+      throw new NotFoundException('Hàng hóa không tồn tại');
     }
 
-    await this.db.query('UPDATE products SET "deletedAt" = NOW(), "updatedAt" = NOW() WHERE id = $1', [id]);
+    if (!this.branchPolicy.isAdmin(user)) {
+      const branchRef = await this.db.query<{ id: string }>(
+        'SELECT id FROM product_branches WHERE "productId" = $1 AND "branchId" = $2 LIMIT 1',
+        [id, user.branchId],
+      );
+      if (!branchRef[0]) {
+        throw new NotFoundException('Hàng hóa không tồn tại');
+      }
+    }
 
-    return { success: true };
+    const impactedOrders = await this.db.query<ProductDeleteImpactOrder>(
+      `SELECT od.id AS "orderId",
+              od."orderCode" AS "orderCode",
+              od."orderState" AS "orderState",
+              od."createdAt"::text AS "createdAt",
+              COUNT(oi.id)::int AS "itemCount"
+       FROM orders od
+       INNER JOIN order_items oi ON oi."orderId" = od.id
+       WHERE oi."productId" = $1
+       GROUP BY od.id
+       ORDER BY od."createdAt" DESC`,
+      [id],
+    );
+
+    return {
+      totalOrders: impactedOrders.length,
+      orders: impactedOrders,
+    };
   }
 
   async listCategories() {
