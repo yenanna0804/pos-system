@@ -780,9 +780,7 @@ export class ProductsService {
             : this.toMoney(surchargeValue);
         const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
         const paidAmount = Math.min(this.toMoney(order.paidAmount), finalAmount);
-        const nextOrderState = itemCount === 0
-          ? 'DELETED'
-          : (finalAmount > 0 && paidAmount >= finalAmount ? 'PAID' : 'PARTIAL');
+        const nextOrderState = finalAmount > 0 && paidAmount >= finalAmount ? 'PAID' : 'PARTIAL';
 
         await tx.query(
           `UPDATE orders
@@ -803,10 +801,8 @@ export class ProductsService {
           [
             randomUUID(),
             order.orderId,
-            nextOrderState === 'DELETED' ? 'DELETE_ORDER' : 'UPDATE_ORDER',
-            nextOrderState === 'DELETED'
-              ? 'Hệ thống tự động đánh dấu xóa hóa đơn do xóa hàng hóa làm trống hóa đơn'
-              : 'Hệ thống tự động cập nhật hóa đơn do xóa hàng hóa',
+            'UPDATE_ORDER',
+            'Hệ thống tự động cập nhật hóa đơn do xóa hàng hóa',
             JSON.stringify({
               source: 'PRODUCT_DELETE',
               removedProductId: id,

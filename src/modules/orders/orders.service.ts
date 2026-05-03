@@ -118,6 +118,21 @@ export class OrdersService {
 
   private toMoney(value: unknown) { return this.pricing.toMoney(value); }
   private toRawAdjustmentValue(value: unknown) { return this.pricing.toRawAdjustmentValue(value); }
+
+  private async cleanupEmptyDraftOrdersForUserBranch(userId: string, branchId: string) {
+    await this.db.query(
+      `DELETE FROM orders od
+       WHERE od."branchId" = $1
+         AND od."userId" = $2
+         AND od."orderState" = 'DRAFT'::"OrderLifecycleState"
+         AND NOT EXISTS (
+           SELECT 1
+           FROM order_items oi
+           WHERE oi."orderId" = od.id
+         )`,
+      [branchId, userId],
+    );
+  }
   private normalizeAdjustmentMode(value: unknown, fallback: AdjustmentMode = 'amount') { return this.pricing.normalizeAdjustmentMode(value, fallback); }
   private normalizePaymentMethod(value: unknown, fallback: PaymentMethod = 'CASH') { return this.pricing.normalizePaymentMethod(value, fallback); }
   private calculateTimePrice(rateAmount: number, rateMinutes: number, usedMinutes: number) { return this.pricing.calculateTimePrice(rateAmount, rateMinutes, usedMinutes); }
@@ -497,6 +512,9 @@ export class OrdersService {
     const items = await this.normalizeItems(orderId, input.billItems);
     const isDraftCreate = String(input.orderState || '').toUpperCase() === 'DRAFT';
     if (items.length === 0 && !isDraftCreate) throw new BadRequestException('Hóa đơn phải có ít nhất một món');
+    if (isDraftCreate) {
+      await this.cleanupEmptyDraftOrdersForUserBranch(user.id, branchId);
+    }
     const totals = this.computeOrderTotals({
       itemsSubtotal: items.reduce((sum, it) => sum + it.lineTotal, 0),
       discountMode: input.discountMode,
@@ -710,10 +728,6 @@ export class OrdersService {
     }
 
     const normalized = await this.normalizeItems(id, nextBillItems);
-    if (normalized.length === 0) {
-      await this.hardDelete(user, id);
-      return { success: true };
-    }
     const totals = this.computeOrderTotals({
       itemsSubtotal: normalized.reduce((sum, it) => sum + it.lineTotal, 0),
       discountMode: input.discountMode ?? rows[0].discountMode,
@@ -884,16 +898,6 @@ export class OrdersService {
     const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-
-    const itemCountRows = await this.db.query<{ itemCount: string }>(
-      'SELECT COUNT(*)::text AS "itemCount" FROM order_items WHERE "orderId" = $1',
-      [id],
-    );
-    const itemCount = Math.max(0, Math.trunc(Number(itemCountRows[0]?.itemCount || 0)));
-    if (itemCount === 0) {
-      await this.db.query('DELETE FROM orders WHERE id = $1', [id]);
-      return { success: true };
-    }
 
     if (rows[0].orderState === 'DELETED') return { success: true };
     await this.db.withTransaction(async (tx) => {
