@@ -1,12 +1,13 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { PgService } from '../../database/pg.service';
+import type { QueryResultRow } from 'pg';
 import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
-import type { QueryResultRow } from 'pg';
+import { PgService } from '../../database/pg.service';
+import { OrderPricingService, type AdjustmentMode, type PaymentMethod } from './order-pricing.service';
 
 type CreateOrderInput = {
-  entityType: 'TABLE' | 'ROOM';
+  entityType?: 'TABLE' | 'ROOM';
   tableId?: string;
   roomId?: string;
   customerName?: string;
@@ -19,6 +20,7 @@ type CreateOrderInput = {
   surchargeValue?: number;
   paidAmount?: number;
   paymentMethod?: 'CASH' | 'BANKING';
+  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL';
   billItems: {
     lineId: string;
     productId: string;
@@ -28,148 +30,302 @@ type CreateOrderInput = {
     unitPrice: number;
     quantity: number;
     note: string;
+    pricingTypeSnapshot?: 'FIXED' | 'TIME';
+    timeRateAmountSnapshot?: number;
+    timeRateMinutesSnapshot?: number;
+    usedMinutes?: number;
+    startAt?: string | null;
+    stopAt?: string | null;
   }[];
   branchId?: string;
 };
 
-type UpdateOrderInput = {
-  entityType?: 'TABLE' | 'ROOM';
-  tableId?: string;
-  roomId?: string;
-  customerName?: string;
-  totalAmount?: number;
-  discountAmount?: number;
-  discountMode?: 'percent' | 'amount';
-  discountValue?: number;
-  surchargeAmount?: number;
-  surchargeMode?: 'percent' | 'amount';
-  surchargeValue?: number;
-  paidAmount?: number;
-  paymentMethod?: 'CASH' | 'BANKING';
-  billItems?: {
-    lineId: string;
-    productId: string;
-    productName: string;
-    unit?: string;
-    baseUnitPrice?: number;
-    unitPrice: number;
-    quantity: number;
-    note: string;
-  }[];
+type UpdateOrderInput = Partial<CreateOrderInput> & {
+  billItemsPatch?: {
+    addedItems?: {
+      lineId?: string;
+      productId: string;
+      productName: string;
+      unit?: string;
+      baseUnitPrice?: number;
+      unitPrice: number;
+      quantity: number;
+      note: string;
+      pricingTypeSnapshot?: 'FIXED' | 'TIME';
+      timeRateAmountSnapshot?: number;
+      timeRateMinutesSnapshot?: number;
+      usedMinutes?: number;
+      startAt?: string | null;
+      stopAt?: string | null;
+    }[];
+    updatedItems?: (Partial<CreateOrderInput['billItems'][number]> & { lineId: string })[];
+    removedItemIds?: string[];
+  };
 };
 
-type NormalizedOrderItem = {
+type NormalizedItem = {
+  clientLineId: string;
   lineId: string;
   productId: string;
   productName: string;
   unit?: string;
+  quantity: number;
+  pricingTypeSnapshot: 'FIXED' | 'TIME';
   baseUnitPrice: number;
   unitPrice: number;
-  quantity: number;
-  note: string;
   lineTotal: number;
+  timeRateAmountSnapshot: number | null;
+  timeRateMinutesSnapshot: number | null;
+  usedMinutes: number;
+  startAt: string | null;
+  stopAt: string | null;
+  note: string;
 };
 
-type OrdersExecutor = {
-  query<T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<T[]>;
-};
-
-type AdjustmentMode = 'percent' | 'amount';
-type PaymentMethod = 'CASH' | 'BANKING';
+type OrdersExecutor = { query<T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<T[]> };
 
 @Injectable()
 export class OrdersService {
   constructor(
     private readonly db: PgService,
     private readonly branchPolicy: BranchPolicyService,
+    private readonly pricing: OrderPricingService,
   ) {}
 
-  private buildOrderCodePrefix(date: Date) {
-    const yy = String(date.getFullYear()).slice(-2);
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    return `HD${yy}${mm}${dd}`;
+  private toMoney(value: unknown) { return this.pricing.toMoney(value); }
+  private toRawAdjustmentValue(value: unknown) { return this.pricing.toRawAdjustmentValue(value); }
+  private normalizeAdjustmentMode(value: unknown, fallback: AdjustmentMode = 'amount') { return this.pricing.normalizeAdjustmentMode(value, fallback); }
+  private normalizePaymentMethod(value: unknown, fallback: PaymentMethod = 'CASH') { return this.pricing.normalizePaymentMethod(value, fallback); }
+  private calculateTimePrice(rateAmount: number, rateMinutes: number, usedMinutes: number) { return this.pricing.calculateTimePrice(rateAmount, rateMinutes, usedMinutes); }
+
+  private readonly takeawayAreaName = 'Mang về';
+  private readonly takeawayTableName = '(Mang về)';
+
+  private isUuid(value: unknown): value is string {
+    if (typeof value !== 'string') return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim());
   }
 
-  private toMoney(value: unknown) {
-    return Math.max(0, Math.trunc(Number(value) || 0));
+  private resolveLineId(lineId: unknown) {
+    if (this.isUuid(lineId)) return lineId.trim().toLowerCase();
+    return randomUUID();
   }
 
-  private toRawAdjustmentValue(value: unknown) {
-    const numeric = Math.max(0, Number(value) || 0);
-    return Number(numeric.toFixed(4));
+  private calculateUsedMinutesFromTimestamps(startAt?: string | null, stopAt?: string | null) {
+    if (!startAt || !stopAt) return null;
+    const startMs = Date.parse(startAt);
+    const stopMs = Date.parse(stopAt);
+    if (!Number.isFinite(startMs) || !Number.isFinite(stopMs) || stopMs <= startMs) return 0;
+    return Math.ceil((stopMs - startMs) / 60000);
   }
 
-  private normalizeAdjustmentMode(value: unknown, fallback: AdjustmentMode = 'amount'): AdjustmentMode {
-    if (value === 'percent' || value === 'amount') return value;
-    return fallback;
+  private async generateOrderCode(executor: OrdersExecutor) {
+    const now = new Date();
+    const yy = String(now.getFullYear()).slice(-2);
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const prefix = `HD${yy}${mm}${dd}`;
+    const seq = await executor.query<{ nextSeq: string }>(`SELECT nextval('public.orders_order_code_seq')::text AS "nextSeq"`);
+    return `${prefix}${Number(seq[0]?.nextSeq || 1)}`;
   }
 
-  private normalizePaymentMethod(value: unknown, fallback: PaymentMethod = 'CASH'): PaymentMethod {
-    if (value === 'CASH' || value === 'BANKING') return value;
-    return fallback;
-  }
-
-  private async generateNextOrderCode(executor: OrdersExecutor, date: Date) {
-    const prefix = this.buildOrderCodePrefix(date);
-    const rows = await executor.query<{ nextSeq: string }>(
-      `SELECT nextval('public.orders_order_code_seq')::text AS "nextSeq"`,
-    );
-    const nextSeq = Number(rows[0]?.nextSeq || 1);
-    return `${prefix}${nextSeq}`;
-  }
-
-  private async logAction(executor: OrdersExecutor, params: {
-    orderId: string;
-    action: 'CREATE_ORDER' | 'UPDATE_ORDER' | 'DELETE_ORDER' | 'PAY_PARTIAL' | 'PAY_FULL' | 'PRINT_ORDER';
-    detail?: string;
-    snapshot?: unknown;
-    userId: string;
-  }) {
+  private async logAction(executor: OrdersExecutor, payload: { orderId: string; action: string; detail?: string; snapshot?: unknown; userId: string }) {
     await executor.query(
-      `INSERT INTO order_logs (id, "orderId", action, detail, snapshot, "createdBy", "createdAt")
-       VALUES ($1, $2, $3::"OrderLogAction", $4, CAST($5 AS jsonb), $6, NOW())`,
-      [
-        randomUUID(),
-        params.orderId,
-        params.action,
-        params.detail || null,
-        JSON.stringify(params.snapshot ?? null),
-        params.userId,
-      ],
+      `INSERT INTO order_logs (id, "orderId", action, detail, snapshot, "createdBy", "createdAt") VALUES ($1, $2, $3::"OrderLogAction", $4, CAST($5 AS jsonb), $6, NOW())`,
+      [randomUUID(), payload.orderId, payload.action, payload.detail || null, JSON.stringify(payload.snapshot ?? null), payload.userId],
     );
   }
 
-  private normalizeOrderItems(items: CreateOrderInput['billItems']): NormalizedOrderItem[] {
-    const rows = Array.isArray(items) ? items : [];
-    return rows
-      .map((item) => {
-        const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
-        const baseUnitPrice = this.toMoney(item.baseUnitPrice ?? item.unitPrice);
-        const unitPrice = this.toMoney(item.unitPrice);
-        const lineTotal = quantity * unitPrice;
-        return {
-          lineId: item.lineId,
-          productId: item.productId,
-          productName: item.productName,
-          unit: item.unit,
-          baseUnitPrice,
-          unitPrice,
-          quantity,
-          note: item.note || '',
-          lineTotal,
-        };
-      })
-      .filter((item) => item.productId);
+  private async resolveResourceBranch(user: CurrentUser, input: { entityType?: 'TABLE' | 'ROOM'; tableId?: string; roomId?: string; branchId?: string }) {
+    let resourceBranchId: string | null = null;
+    if (input.entityType === 'TABLE') {
+      if (!input.tableId) throw new BadRequestException('Bàn là bắt buộc');
+      const rows = await this.db.query<{ branchId: string | null }>('SELECT "branchId" AS "branchId" FROM tables WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1', [input.tableId]);
+      if (!rows[0]) throw new NotFoundException('Bàn không tồn tại');
+      this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+      resourceBranchId = rows[0].branchId;
+    }
+    if (input.entityType === 'ROOM') {
+      if (!input.roomId) throw new BadRequestException('Phòng là bắt buộc');
+      const rows = await this.db.query<{ branchId: string | null }>('SELECT "branchId" AS "branchId" FROM rooms WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1', [input.roomId]);
+      if (!rows[0]) throw new NotFoundException('Phòng không tồn tại');
+      this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+      resourceBranchId = rows[0].branchId;
+    }
+    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? resourceBranchId);
+    if (!branchId) throw new BadRequestException('Vui lòng chọn chi nhánh trước khi tạo hóa đơn');
+    if (resourceBranchId && resourceBranchId !== branchId) throw new BadRequestException('Đối tượng không thuộc chi nhánh đang chọn');
+    return branchId;
   }
 
-  private async replaceOrderItems(executor: OrdersExecutor, orderId: string, items: NormalizedOrderItem[]) {
+  private async normalizeItems(orderId: string, items: CreateOrderInput['billItems']): Promise<NormalizedItem[]> {
+    const raw = Array.isArray(items) ? items : [];
+    const productIds = [...new Set(raw.map((i) => i.productId).filter(Boolean))];
+    const productRows = productIds.length > 0
+      ? await this.db.query<{ id: string; name: string; unit: string | null; type: 'SINGLE' | 'COMBO' | 'TIME'; timeRateAmount: string | null; timeRateMinutes: number | null }>(
+        `SELECT id, name, unit, "type", "timeRateAmount"::text AS "timeRateAmount", "timeRateMinutes" AS "timeRateMinutes"
+         FROM products WHERE id = ANY($1::text[]) AND "deletedAt" IS NULL`,
+        [productIds],
+      )
+      : [];
+    const byProduct = new Map(productRows.map((r) => [r.id, r]));
+    const normalized: NormalizedItem[] = [];
+    const usedLineIds = new Set<string>();
+    for (const item of raw) {
+      const product = byProduct.get(item.productId);
+      if (!product) continue;
+      let lineId = this.resolveLineId(item.lineId);
+      if (usedLineIds.has(lineId)) {
+        lineId = randomUUID();
+      }
+      usedLineIds.add(lineId);
+      if (product.type === 'TIME' || item.pricingTypeSnapshot === 'TIME') {
+        const rateAmount = this.toMoney(item.timeRateAmountSnapshot ?? product.timeRateAmount ?? item.unitPrice);
+        const rateMinutes = Math.max(1, Math.trunc(Number(item.timeRateMinutesSnapshot ?? product.timeRateMinutes) || 0));
+        const usedMinutesFromTime = this.calculateUsedMinutesFromTimestamps(item.startAt || null, item.stopAt || null);
+        const usedMinutes = usedMinutesFromTime != null
+          ? Math.max(0, Math.trunc(usedMinutesFromTime))
+          : Math.max(0, Math.trunc(Number(item.usedMinutes) || 0));
+        const unitPrice = this.toMoney(item.unitPrice ?? rateAmount);
+        normalized.push({
+          clientLineId: String(item.lineId || ''),
+          lineId,
+          productId: product.id,
+          productName: item.productName || product.name,
+          unit: item.unit || product.unit || undefined,
+          quantity: 1,
+          pricingTypeSnapshot: 'TIME',
+          baseUnitPrice: rateAmount,
+          unitPrice,
+          lineTotal: this.calculateTimePrice(unitPrice, rateMinutes, usedMinutes),
+          timeRateAmountSnapshot: rateAmount,
+          timeRateMinutesSnapshot: rateMinutes,
+          usedMinutes,
+          startAt: item.startAt || null,
+          stopAt: item.stopAt || null,
+          note: item.note || '',
+        });
+        continue;
+      }
+      const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
+      const unitPrice = this.toMoney(item.unitPrice);
+      normalized.push({
+        clientLineId: String(item.lineId || ''),
+        lineId,
+        productId: product.id,
+        productName: item.productName || product.name,
+        unit: item.unit || product.unit || undefined,
+        quantity,
+        pricingTypeSnapshot: 'FIXED',
+        baseUnitPrice: this.toMoney(item.baseUnitPrice ?? unitPrice),
+        unitPrice,
+        lineTotal: quantity * unitPrice,
+        timeRateAmountSnapshot: null,
+        timeRateMinutesSnapshot: null,
+        usedMinutes: 0,
+        startAt: item.startAt || null,
+        stopAt: item.stopAt || null,
+        note: item.note || '',
+      });
+    }
+    return normalized;
+  }
+
+  private async resolveTakeawayTableId(branchId: string) {
+    const existingTable = await this.db.query<{ id: string }>(
+      `SELECT id FROM tables
+       WHERE "deletedAt" IS NULL
+         AND "branchId" = $1
+         AND name IN ($2, $3, $4)
+       ORDER BY CASE WHEN name = $2 THEN 0 ELSE 1 END, "createdAt" ASC
+       LIMIT 1`,
+      [branchId, this.takeawayTableName, this.takeawayAreaName, 'Mang ve'],
+    );
+    if (existingTable[0]?.id) return existingTable[0].id;
+
+    const existingArea = await this.db.query<{ id: string }>(
+      `SELECT id FROM areas
+       WHERE "deletedAt" IS NULL
+         AND "branchId" = $1
+         AND name IN ($2, $3)
+       ORDER BY CASE WHEN name = $2 THEN 0 ELSE 1 END, "createdAt" ASC
+       LIMIT 1`,
+      [branchId, this.takeawayAreaName, 'Mang ve'],
+    );
+
+    const areaId = existingArea[0]?.id || randomUUID();
+    if (!existingArea[0]?.id) {
+      await this.db.query(
+        `INSERT INTO areas (id, name, "branchId", "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, NOW(), NOW())`,
+        [areaId, this.takeawayAreaName, branchId],
+      );
+    }
+
+    const tableId = randomUUID();
+    await this.db.query(
+      `INSERT INTO tables (id, name, capacity, status, "isActive", "branchId", "areaId", "roomId", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, CAST($4 AS "TableStatus"), $5, $6, $7, $8, NOW(), NOW())`,
+      [tableId, this.takeawayTableName, 1, 'AVAILABLE', true, branchId, areaId, null],
+    );
+    return tableId;
+  }
+
+  private computeOrderTotals(input: {
+    itemsSubtotal: number;
+    discountMode?: unknown;
+    discountValue?: unknown;
+    discountAmount?: unknown;
+    surchargeMode?: unknown;
+    surchargeValue?: unknown;
+    surchargeAmount?: unknown;
+    paidAmount?: unknown;
+    orderState?: unknown;
+  }) {
+    const discountMode = this.normalizeAdjustmentMode(input.discountMode, 'amount');
+    const surchargeMode = this.normalizeAdjustmentMode(input.surchargeMode, 'amount');
+    const discountValue = this.toRawAdjustmentValue(input.discountValue ?? input.discountAmount);
+    const surchargeValue = this.toRawAdjustmentValue(input.surchargeValue ?? input.surchargeAmount);
+    const subtotalAmount = Math.max(0, this.toMoney(input.itemsSubtotal));
+    const discountAmount = discountMode === 'percent'
+      ? this.toMoney(Math.min(subtotalAmount, (subtotalAmount * discountValue) / 100))
+      : Math.min(subtotalAmount, this.toMoney(discountValue));
+    const subtotalAfterDiscount = Math.max(0, subtotalAmount - discountAmount);
+    const surchargeAmount = surchargeMode === 'percent'
+      ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
+      : this.toMoney(surchargeValue);
+    const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
+    const paidAmount = Math.min(this.toMoney(input.paidAmount), finalAmount);
+    const forcedOrderState = String(input.orderState || '').toUpperCase();
+    const orderState = forcedOrderState === 'DRAFT'
+      ? 'DRAFT'
+      : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL');
+    return { subtotalAmount, discountMode, discountValue, discountAmount, surchargeMode, surchargeValue, surchargeAmount, finalAmount, paidAmount, orderState };
+  }
+
+  private async replaceItems(executor: OrdersExecutor, orderId: string, items: NormalizedItem[]) {
     await executor.query('DELETE FROM order_items WHERE "orderId" = $1', [orderId]);
-    for (const item of items) {
+    for (const [index, item] of items.entries()) {
       await executor.query(
-        `INSERT INTO order_items (id, "orderId", "productId", quantity, "baseUnitPrice", "unitPrice", "totalPrice", note, "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
-        [randomUUID(), orderId, item.productId, item.quantity, item.baseUnitPrice, item.unitPrice, item.lineTotal, item.note || null],
+        `INSERT INTO order_items (id, "orderId", "productId", quantity, "baseUnitPrice", "unitPrice", "totalPrice", "pricingTypeSnapshot", "timeRateAmountSnapshot", "timeRateMinutesSnapshot", "usedMinutes", "startAt", "stopAt", "displayOrder", note, "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz, $14, $15, NOW(), NOW())`,
+        [
+          item.lineId,
+          orderId,
+          item.productId,
+          item.quantity,
+          item.baseUnitPrice,
+          item.unitPrice,
+          item.lineTotal,
+          item.pricingTypeSnapshot,
+          item.timeRateAmountSnapshot,
+          item.timeRateMinutesSnapshot,
+          item.usedMinutes,
+          item.startAt,
+          item.stopAt,
+          index + 1,
+          item.note || null,
+        ],
       );
     }
   }
@@ -187,679 +343,351 @@ export class OrdersService {
     startDate?: string;
     endDate?: string;
   }) {
-    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
-    const page = Math.max(1, Number(params.page) || 1);
-    const pageSize = Math.min(50, Math.max(1, Number(params.pageSize) || 10));
-    const offset = (page - 1) * pageSize;
-    const search = params.search?.trim() || null;
-    const orderStates = Array.isArray(params.orderStates) && params.orderStates.length > 0 ? params.orderStates : null;
-    const paymentMethod = params.paymentMethod ? this.normalizePaymentMethod(params.paymentMethod, 'CASH') : null;
-    const areaId = params.areaId || null;
-    const roomId = params.roomId || null;
-    const tableId = params.tableId || null;
-    const startDateIso = params.startDate ? new Date(params.startDate).toISOString() : null;
-    const endDateIso = params.endDate ? new Date(params.endDate).toISOString() : null;
-
-    const countRows = await this.db.query<{ total: number }>(
-      `SELECT COUNT(*)::int AS total
-       FROM orders od
-       LEFT JOIN users u ON u.id = od."userId"
-       LEFT JOIN tables t ON t.id = od."tableId"
-       LEFT JOIN areas a ON a.id = t."areaId"
-       LEFT JOIN rooms r ON r.id = t."roomId"
-       LEFT JOIN rooms rr ON rr.id = od."roomId"
-       LEFT JOIN areas ar ON ar.id = rr."areaId"
-       WHERE ($1::text IS NULL OR od."branchId" = $1)
-         AND ($2::text IS NULL OR (
-            od."orderCode" ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(a.name, ar.name, '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(r.name, rr.name, '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(t.name, '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(od."customerName", '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(u."fullName", u.username, '') ILIKE CONCAT('%', $2, '%')
-         ))
-         AND ($3::text[] IS NULL OR od."orderState"::text = ANY($3))
-          AND ($4::"PaymentMethod" IS NULL OR od."paymentMethod" = $4)
-          AND ($5::text IS NULL OR COALESCE(a.id, ar.id) = $5)
-          AND ($6::text IS NULL OR COALESCE(r.id, rr.id) = $6)
-          AND ($7::text IS NULL OR t.id = $7)
-          AND ($8::timestamptz IS NULL OR od."createdAt" >= $8)
-          AND ($9::timestamptz IS NULL OR od."createdAt" <= $9)`,
-        [scopedBranchId || null, search, orderStates, paymentMethod, areaId, roomId, tableId, startDateIso, endDateIso],
-    );
-    const total = Number(countRows[0]?.total || 0);
+    const branchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
+    if (!branchId) return { items: [], pagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 } };
+    const page = Math.max(1, Math.trunc(Number(params.page) || 1));
+    const pageSize = Math.max(1, Math.min(100, Math.trunc(Number(params.pageSize) || 10)));
+    const where: string[] = ['od."branchId" = $1'];
+    const sqlParams: unknown[] = [branchId];
+    if (params.search?.trim()) {
+      sqlParams.push(`%${params.search.trim()}%`);
+      where.push(`(od."orderCode" ILIKE $${sqlParams.length} OR COALESCE(od."customerName", '') ILIKE $${sqlParams.length})`);
+    }
+    if (params.orderStates?.length) {
+      sqlParams.push(params.orderStates);
+      where.push(`od."orderState"::text = ANY($${sqlParams.length}::text[])`);
+    }
+    if (params.paymentMethod) {
+      sqlParams.push(params.paymentMethod);
+      where.push(`od."paymentMethod"::text = $${sqlParams.length}`);
+    }
+    if (params.roomId) {
+      sqlParams.push(params.roomId);
+      where.push(`od."roomId" = $${sqlParams.length}`);
+    }
+    if (params.tableId) {
+      sqlParams.push(params.tableId);
+      where.push(`od."tableId" = $${sqlParams.length}`);
+    }
+    if (params.startDate) {
+      sqlParams.push(params.startDate);
+      where.push(`od."createdAt" >= $${sqlParams.length}::timestamptz`);
+    }
+    if (params.endDate) {
+      sqlParams.push(params.endDate);
+      where.push(`od."createdAt" <= $${sqlParams.length}::timestamptz`);
+    }
+    const whereSql = where.join(' AND ');
+    const totalRows = await this.db.query<{ total: string }>(`SELECT COUNT(*)::text AS total FROM orders od WHERE ${whereSql}`, sqlParams);
+    const total = Number(totalRows[0]?.total || 0);
+    sqlParams.push(pageSize, (page - 1) * pageSize);
     const rows = await this.db.query<{
-      id: string;
-      code: string;
-      "tableName": string;
-      "areaName": string;
-      "roomName": string | null;
-      "customerName": string | null;
-      "totalAmount": string;
-      "finalAmount": string;
-      "paidAmount": string;
-      "paymentMethod": PaymentMethod | null;
-      "creatorName": string | null;
-      orderState: 'PAID' | 'DELETED' | 'PARTIAL';
-      "createdAt": string;
+      id: string; code: string; tableName: string | null; customerName: string | null; creatorName: string | null;
+      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED'; createdAt: string;
     }>(
-      `SELECT od.id,
-              od."orderCode" AS code,
-              t.name AS "tableName",
-              COALESCE(a.name, ar.name) AS "areaName",
-              COALESCE(r.name, rr.name) AS "roomName",
-              od."customerName",
-              od."totalAmount"::text AS "totalAmount",
-              od."finalAmount"::text AS "finalAmount",
-               od."paidAmount"::text AS "paidAmount",
-               od."paymentMethod"::text AS "paymentMethod",
-               COALESCE(NULLIF(u."fullName", ''), u.username, od."userId") AS "creatorName",
-              od."orderState" AS "orderState",
-              od."createdAt"
+      `SELECT od.id, od."orderCode" AS code, COALESCE(t.name, r.name, '-') AS "tableName", od."customerName" AS "customerName",
+              COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "creatorName",
+              od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount",
+              od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt"::text AS "createdAt"
        FROM orders od
        LEFT JOIN users u ON u.id = od."userId"
        LEFT JOIN tables t ON t.id = od."tableId"
-       LEFT JOIN areas a ON a.id = t."areaId"
-       LEFT JOIN rooms r ON r.id = t."roomId"
-       LEFT JOIN rooms rr ON rr.id = od."roomId"
-       LEFT JOIN areas ar ON ar.id = rr."areaId"
-       WHERE ($1::text IS NULL OR od."branchId" = $1)
-         AND ($2::text IS NULL OR (
-            od."orderCode" ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(a.name, ar.name, '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(r.name, rr.name, '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(t.name, '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(od."customerName", '') ILIKE CONCAT('%', $2, '%') OR
-            COALESCE(u."fullName", u.username, '') ILIKE CONCAT('%', $2, '%')
-         ))
-         AND ($3::text[] IS NULL OR od."orderState"::text = ANY($3))
-          AND ($4::"PaymentMethod" IS NULL OR od."paymentMethod" = $4)
-          AND ($5::text IS NULL OR COALESCE(a.id, ar.id) = $5)
-          AND ($6::text IS NULL OR COALESCE(r.id, rr.id) = $6)
-          AND ($7::text IS NULL OR t.id = $7)
-          AND ($8::timestamptz IS NULL OR od."createdAt" >= $8)
-          AND ($9::timestamptz IS NULL OR od."createdAt" <= $9)
-        ORDER BY od."createdAt" DESC
-        LIMIT $10 OFFSET $11`,
-        [scopedBranchId || null, search, orderStates, paymentMethod, areaId, roomId, tableId, startDateIso, endDateIso, pageSize, offset],
+       LEFT JOIN rooms r ON r.id = od."roomId"
+       WHERE ${whereSql}
+       ORDER BY od."createdAt" DESC
+       LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
+      sqlParams,
     );
-
     return {
-      items: rows.map((row) => {
-      const locationParts = [row.areaName || '', row.roomName || '', row.tableName || ''].filter((part) => part && part.trim());
-      return {
-      id: row.id,
-      code: row.code,
-      tableName: locationParts.length > 0 ? locationParts.join(' / ') : '-',
-      customerName: row.customerName,
-      totalAmount: this.toMoney(row.totalAmount),
-      finalAmount: this.toMoney(row.finalAmount),
-      paidAmount: this.toMoney(row.paidAmount),
-      paymentMethod: row.paymentMethod,
-      creatorName: row.creatorName || '-',
-      orderState: row.orderState,
-      createdAt: row.createdAt,
-      };
-      }),
-      pagination: {
-        page,
-        pageSize,
-        total,
-        totalPages: Math.max(1, Math.ceil(total / pageSize)),
-      },
+      items: rows.map((r) => ({ ...r, totalAmount: this.toMoney(r.totalAmount), finalAmount: this.toMoney(r.finalAmount), paidAmount: this.toMoney(r.paidAmount) })),
+      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
     };
   }
 
   async createOrder(user: CurrentUser, input: CreateOrderInput) {
-    if (input.entityType !== 'TABLE' && input.entityType !== 'ROOM') {
-      throw new BadRequestException('Loại đối tượng hóa đơn không hợp lệ');
+    if (input.entityType && input.entityType !== 'TABLE' && input.entityType !== 'ROOM') throw new BadRequestException('Loại đối tượng hóa đơn không hợp lệ');
+    const orderId = randomUUID();
+    const selectedBranchId = await this.resolveResourceBranch(user, input);
+    let normalizedInput: CreateOrderInput = input;
+    if (!input.entityType || (input.entityType === 'TABLE' && !input.tableId) || (input.entityType === 'ROOM' && !input.roomId)) {
+      const takeawayTableId = await this.resolveTakeawayTableId(selectedBranchId);
+      normalizedInput = {
+        ...input,
+        entityType: 'TABLE',
+        tableId: takeawayTableId,
+        roomId: undefined,
+      };
     }
 
-    let resourceBranchId: string | null = null;
-    if (input.entityType === 'TABLE') {
-      if (!input.tableId) throw new BadRequestException('Bàn là bắt buộc');
-      const tableRows = await this.db.query<{ id: string; "branchId": string | null }>(
-        'SELECT id, "branchId" FROM tables WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
-        [input.tableId],
-      );
-      if (!tableRows[0]) throw new NotFoundException('Bàn không tồn tại');
-      this.branchPolicy.assertResourceBranchAccess(user, tableRows[0].branchId);
-      resourceBranchId = tableRows[0].branchId;
-    }
-    if (input.entityType === 'ROOM') {
-      if (!input.roomId) throw new BadRequestException('Phòng là bắt buộc');
-      const roomRows = await this.db.query<{ id: string; "branchId": string | null }>(
-        'SELECT id, "branchId" FROM rooms WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
-        [input.roomId],
-      );
-      if (!roomRows[0]) throw new NotFoundException('Phòng không tồn tại');
-      this.branchPolicy.assertResourceBranchAccess(user, roomRows[0].branchId);
-      resourceBranchId = roomRows[0].branchId;
-    }
-
-    const branchId = this.branchPolicy.resolveWriteBranchId(user, input.branchId ?? resourceBranchId);
-    if (!branchId) throw new BadRequestException('Vui lòng chọn chi nhánh trước khi tạo hóa đơn');
-    if (resourceBranchId && resourceBranchId !== branchId) {
-      throw new BadRequestException('Đối tượng không thuộc chi nhánh đang chọn');
-    }
-    const billItems = this.normalizeOrderItems(input.billItems);
-    if (billItems.length === 0) throw new BadRequestException('Hóa đơn phải có ít nhất một món');
-    const subtotalAmount = billItems.reduce((sum, item) => sum + item.lineTotal, 0);
-    const discountMode = this.normalizeAdjustmentMode(input.discountMode, 'amount');
-    const surchargeMode = this.normalizeAdjustmentMode(input.surchargeMode, 'amount');
-    const discountValue = this.toRawAdjustmentValue(input.discountValue ?? input.discountAmount);
-    const surchargeValue = this.toRawAdjustmentValue(input.surchargeValue ?? input.surchargeAmount);
-    const discountAmount = discountMode === 'percent'
-      ? this.toMoney(Math.min(subtotalAmount, (subtotalAmount * discountValue) / 100))
-      : Math.min(subtotalAmount, this.toMoney(discountValue));
-    const subtotalAfterDiscount = Math.max(0, subtotalAmount - discountAmount);
-    const surchargeAmount = surchargeMode === 'percent'
-      ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
-      : this.toMoney(surchargeValue);
-    const totalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
-
-    const id = randomUUID();
-    let orderCode = '';
-    const normalizedPaidAmount = this.toMoney(input.paidAmount);
-    const paidAmount = Math.min(normalizedPaidAmount, totalAmount);
+    const branchId = await this.resolveResourceBranch(user, normalizedInput);
+    const items = await this.normalizeItems(orderId, input.billItems);
+    const isDraftCreate = String(input.orderState || '').toUpperCase() === 'DRAFT';
+    if (items.length === 0 && !isDraftCreate) throw new BadRequestException('Hóa đơn phải có ít nhất một món');
+    const totals = this.computeOrderTotals({
+      itemsSubtotal: items.reduce((sum, it) => sum + it.lineTotal, 0),
+      discountMode: input.discountMode,
+      discountValue: input.discountValue,
+      discountAmount: input.discountAmount,
+      surchargeMode: input.surchargeMode,
+      surchargeValue: input.surchargeValue,
+      surchargeAmount: input.surchargeAmount,
+      paidAmount: input.paidAmount,
+      orderState: input.orderState,
+    });
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod, 'CASH');
-    const orderState = paidAmount >= totalAmount ? 'PAID' : 'PARTIAL';
-
+    let code = '';
     await this.db.withTransaction(async (tx) => {
-      orderCode = await this.generateNextOrderCode(tx, new Date());
-
+      code = await this.generateOrderCode(tx);
       await tx.query(
-         `INSERT INTO orders (
-           id, "orderCode", "tableId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount",
-            "orderState", "customerName", "paidAmount", "paymentMethod", "branchId", "roomId", "createdAt", "updatedAt"
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::"OrderAdjustmentMode", $8, $9, $10::"OrderAdjustmentMode", $11, $12, $13::"OrderLifecycleState", $14, $15, $16::"PaymentMethod", $17, $18, NOW(), NOW())`,
+        `INSERT INTO orders (id, "orderCode", "tableId", "roomId", "branchId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount", "paidAmount", "paymentMethod", "orderState", "customerName", "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::"OrderAdjustmentMode", $10, $11, $12::"OrderAdjustmentMode", $13, $14, $15, $16::"PaymentMethod", $17::"OrderLifecycleState", $18, NOW(), NOW())`,
         [
-          id,
-          orderCode,
-        input.entityType === 'TABLE' ? input.tableId : null,
-        user.id,
-          subtotalAmount,
-          discountAmount,
-          discountMode,
-          discountValue,
-          surchargeAmount,
-          surchargeMode,
-          surchargeValue,
-          totalAmount,
-          orderState,
+          orderId, code, normalizedInput.entityType === 'TABLE' ? normalizedInput.tableId || null : null, normalizedInput.entityType === 'ROOM' ? normalizedInput.roomId || null : null,
+          branchId, user.id, totals.subtotalAmount, totals.discountAmount, totals.discountMode, totals.discountValue,
+          totals.surchargeAmount, totals.surchargeMode, totals.surchargeValue, totals.finalAmount, totals.paidAmount, paymentMethod, totals.orderState,
           input.customerName || null,
-          paidAmount,
-          paymentMethod,
-          branchId,
-          input.entityType === 'ROOM' ? input.roomId || null : null,
         ],
       );
-
-      await this.replaceOrderItems(tx, id, billItems);
-
-      await this.logAction(tx, {
-        orderId: id,
-        action: 'CREATE_ORDER',
-        detail: 'Tạo hóa đơn',
-        snapshot: {
-          subtotalAmount,
-          discountAmount,
-          discountMode,
-          discountValue,
-          surchargeAmount,
-          surchargeMode,
-          surchargeValue,
-          totalAmount,
-          paidAmount,
-          paymentMethod,
-          orderState,
-          itemCount: billItems.length,
-          customerName: input.customerName || null,
-        },
-        userId: user.id,
-      });
+      await this.replaceItems(tx, orderId, items);
+      await this.logAction(tx, { orderId, action: 'CREATE_ORDER', detail: 'Tạo hóa đơn', userId: user.id, snapshot: { itemCount: items.length } });
     });
-
-    return { id, code: orderCode };
+    return { id: orderId, code, itemMappings: items.map((i) => ({ clientLineId: i.clientLineId, orderItemId: i.lineId })) };
   }
 
   async getOrderById(user: CurrentUser, id: string) {
     const rows = await this.db.query<{
-      id: string;
-      code: string;
-      tableId: string | null;
-      roomId: string | null;
-      tableName: string | null;
-      areaName: string | null;
-      roomName: string | null;
-      customerName: string | null;
-      discountAmount: string;
-      discountMode: AdjustmentMode;
-      discountValue: string;
-      surchargeAmount: string;
-      surchargeMode: AdjustmentMode;
-      surchargeValue: string;
-      totalAmount: string;
-      finalAmount: string;
-      paidAmount: string;
-      paymentMethod: PaymentMethod | null;
-      orderState: 'PAID' | 'DELETED' | 'PARTIAL';
-      branchId: string | null;
-      createdAt: string;
+      id: string; code: string; tableId: string | null; roomId: string | null; tableName: string | null; roomName: string | null; areaName: string | null;
+      customerName: string | null; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
     }>(
-      `SELECT od.id,
-              od."orderCode" AS code,
-              od."tableId" AS "tableId",
-              od."roomId" AS "roomId",
-              t.name AS "tableName",
-              COALESCE(a.name, ar.name) AS "areaName",
-              COALESCE(r.name, rr.name) AS "roomName",
-              od."customerName" AS "customerName",
-              od."discountAmount"::text AS "discountAmount",
-              od."discountMode"::text AS "discountMode",
-              od."discountValue"::text AS "discountValue",
-              od."surchargeAmount"::text AS "surchargeAmount",
-              od."surchargeMode"::text AS "surchargeMode",
-              od."surchargeValue"::text AS "surchargeValue",
-              od."totalAmount"::text AS "totalAmount",
-              od."finalAmount"::text AS "finalAmount",
-               od."paidAmount"::text AS "paidAmount",
-               od."paymentMethod"::text AS "paymentMethod",
-               od."orderState" AS "orderState",
-              od."branchId" AS "branchId",
-              od."createdAt"
+      `SELECT od.id, od."orderCode" AS code, od."tableId" AS "tableId", od."roomId" AS "roomId", t.name AS "tableName", r.name AS "roomName", COALESCE(a.name, ar.name) AS "areaName",
+              od."customerName" AS "customerName", od."discountAmount"::text AS "discountAmount", od."discountMode"::text AS "discountMode", od."discountValue"::text AS "discountValue",
+              od."surchargeAmount"::text AS "surchargeAmount", od."surchargeMode"::text AS "surchargeMode", od."surchargeValue"::text AS "surchargeValue",
+              od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."paymentMethod"::text AS "paymentMethod",
+              od."orderState" AS "orderState", od."branchId" AS "branchId", od."createdAt"::text AS "createdAt", od."updatedAt"::text AS "updatedAt"
        FROM orders od
        LEFT JOIN tables t ON t.id = od."tableId"
+       LEFT JOIN rooms r ON r.id = od."roomId"
        LEFT JOIN areas a ON a.id = t."areaId"
-       LEFT JOIN rooms r ON r.id = t."roomId"
-       LEFT JOIN rooms rr ON rr.id = od."roomId"
-       LEFT JOIN areas ar ON ar.id = rr."areaId"
-       WHERE od.id = $1
-       LIMIT 1`,
+       LEFT JOIN areas ar ON ar.id = r."areaId"
+       WHERE od.id = $1 LIMIT 1`,
       [id],
     );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
 
     const itemRows = await this.db.query<{
-      id: string;
-      productId: string;
-      quantity: number;
-      baseUnitPrice: string;
-      unitPrice: string;
-      note: string | null;
-      productName: string;
-      unit: string | null;
+      id: string; productId: string; productName: string; pricingTypeSnapshot: 'FIXED' | 'TIME'; quantity: number;
+      baseUnitPrice: string; unitPrice: string; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null; unit: string | null;
     }>(
-      `SELECT oi.id,
-              oi."productId" AS "productId",
-              oi.quantity,
-              oi."baseUnitPrice"::text AS "baseUnitPrice",
-              oi."unitPrice"::text AS "unitPrice",
-              oi.note,
-              p.name AS "productName",
-              p.unit AS unit
+      `SELECT oi.id, oi."productId" AS "productId", p.name AS "productName", oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi.quantity,
+              oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes",
+              oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note, p.unit AS unit
        FROM order_items oi
        LEFT JOIN products p ON p.id = oi."productId"
        WHERE oi."orderId" = $1
-       ORDER BY oi."createdAt" ASC`,
+       ORDER BY oi."displayOrder" ASC, oi."createdAt" ASC`,
       [id],
     );
-
-    const locationParts = [rows[0].areaName || '', rows[0].roomName || '', rows[0].tableName || ''].filter((v) => v && v.trim());
+    const head = rows[0];
     return {
-      id: rows[0].id,
-      code: rows[0].code,
-      entityType: rows[0].tableId ? 'TABLE' : 'ROOM',
-      tableId: rows[0].tableId,
-      roomId: rows[0].roomId,
-      areaName: rows[0].areaName,
-      roomName: rows[0].roomName,
-      tableName: rows[0].tableName,
-      locationLabel: locationParts.join(' / '),
-      customerName: rows[0].customerName,
-      discountAmount: this.toMoney(rows[0].discountAmount),
-      discountMode: this.normalizeAdjustmentMode(rows[0].discountMode, 'amount'),
-      discountValue: this.toRawAdjustmentValue(rows[0].discountValue),
-      surchargeAmount: this.toMoney(rows[0].surchargeAmount),
-      surchargeMode: this.normalizeAdjustmentMode(rows[0].surchargeMode, 'amount'),
-      surchargeValue: this.toRawAdjustmentValue(rows[0].surchargeValue),
-      totalAmount: this.toMoney(rows[0].totalAmount),
-      finalAmount: this.toMoney(rows[0].finalAmount),
-      paidAmount: this.toMoney(rows[0].paidAmount),
-      paymentMethod: rows[0].paymentMethod,
-      orderState: rows[0].orderState,
-      createdAt: rows[0].createdAt,
-      items: itemRows.map((item) => {
-         const baseUnitPrice = this.toMoney(item.baseUnitPrice);
-         const unitPrice = this.toMoney(item.unitPrice);
-        const quantity = Number(item.quantity || 0);
-        const baseAmount = baseUnitPrice * quantity;
-        const actualAmount = unitPrice * quantity;
-        const lineDiscountAmount = baseAmount > actualAmount ? baseAmount - actualAmount : 0;
-        const lineSurchargeAmount = actualAmount > baseAmount ? actualAmount - baseAmount : 0;
-        return {
-          lineId: item.id,
-          productId: item.productId,
-          productName: item.productName || '-',
-          unit: item.unit || undefined,
-          baseUnitPrice,
-          unitPrice,
-          quantity,
-          lineDiscountAmount,
-          lineSurchargeAmount,
-          note: item.note || '',
-        };
-      }),
+      id: head.id,
+      code: head.code,
+      entityType: head.tableId ? 'TABLE' : 'ROOM',
+      tableId: head.tableId,
+      roomId: head.roomId,
+      areaName: head.areaName,
+      roomName: head.roomName,
+      tableName: head.tableName,
+      locationLabel: [head.areaName || '', head.roomName || '', head.tableName || ''].filter(Boolean).join(' / '),
+      customerName: head.customerName,
+      discountAmount: this.toMoney(head.discountAmount),
+      discountMode: this.normalizeAdjustmentMode(head.discountMode, 'amount'),
+      discountValue: this.toRawAdjustmentValue(head.discountValue),
+      surchargeAmount: this.toMoney(head.surchargeAmount),
+      surchargeMode: this.normalizeAdjustmentMode(head.surchargeMode, 'amount'),
+      surchargeValue: this.toRawAdjustmentValue(head.surchargeValue),
+      totalAmount: this.toMoney(head.totalAmount),
+      finalAmount: this.toMoney(head.finalAmount),
+      paidAmount: this.toMoney(head.paidAmount),
+      paymentMethod: head.paymentMethod,
+      orderState: head.orderState,
+      createdAt: head.createdAt,
+      updatedAt: head.updatedAt,
+      items: itemRows.map((item) => ({
+        lineId: item.id,
+        orderItemId: item.id,
+        productId: item.productId,
+        productName: item.productName || '-',
+        pricingTypeSnapshot: item.pricingTypeSnapshot,
+        unit: item.unit || undefined,
+        baseUnitPrice: this.toMoney(item.baseUnitPrice),
+        unitPrice: this.toMoney(item.unitPrice),
+        quantity: Math.max(1, Math.trunc(Number(item.quantity) || 1)),
+        timeRateAmountSnapshot: item.timeRateAmountSnapshot == null ? null : this.toMoney(item.timeRateAmountSnapshot),
+        timeRateMinutesSnapshot: item.timeRateMinutesSnapshot,
+        usedMinutes: Math.max(0, Math.trunc(Number(item.usedMinutes) || 0)),
+        timerStatus: item.startAt && !item.stopAt ? 'RUNNING' : 'STOPPED',
+        activeSessionStartedAt: item.startAt,
+        startAt: item.startAt,
+        stopAt: item.stopAt,
+        lineDiscountAmount: 0,
+        lineSurchargeAmount: 0,
+        note: item.note || '',
+      })),
     };
   }
 
   async updateOrder(user: CurrentUser, id: string, input: UpdateOrderInput) {
-    const rows = await this.db.query<{
-      id: string;
-      "branchId": string | null;
-      "customerName": string | null;
-      "orderState": string;
-      "paidAmount": string;
-      "paymentMethod": PaymentMethod | null;
-      "finalAmount": string;
-      "totalAmount": string;
-      "discountAmount": string;
-      "discountMode": AdjustmentMode;
-      "discountValue": string;
-      "surchargeAmount": string;
-      "surchargeMode": AdjustmentMode;
-      "surchargeValue": string;
-      "tableId": string | null;
-      "roomId": string | null;
-    }>(
-      'SELECT id, "branchId", "customerName", "orderState", "paidAmount", "paymentMethod", "finalAmount", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "tableId", "roomId" FROM orders WHERE id = $1 LIMIT 1',
+    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; discountMode: AdjustmentMode; discountValue: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>(
+      'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "discountMode", "discountValue"::text AS "discountValue", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-    if (rows[0].orderState === 'DELETED') {
-      throw new BadRequestException('Không thể cập nhật hóa đơn đã xóa');
-    }
+    if (rows[0].orderState === 'DELETED') throw new BadRequestException('Không thể cập nhật hóa đơn đã xóa');
 
-    let nextTableId: string | null | undefined;
-    let nextRoomId: string | null | undefined;
-    if (input.entityType) {
-      if (input.entityType === 'TABLE') {
-        if (!input.tableId) throw new BadRequestException('Bàn là bắt buộc');
-        const tableRows = await this.db.query<{ id: string; "branchId": string | null }>(
-          'SELECT id, "branchId" FROM tables WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
-          [input.tableId],
-        );
-        if (!tableRows[0]) throw new NotFoundException('Bàn không tồn tại');
-        this.branchPolicy.assertResourceBranchAccess(user, tableRows[0].branchId);
-        nextTableId = input.tableId;
-        nextRoomId = null;
-      } else {
-        if (!input.roomId) throw new BadRequestException('Phòng là bắt buộc');
-        const roomRows = await this.db.query<{ id: string; "branchId": string | null }>(
-          'SELECT id, "branchId" FROM rooms WHERE id = $1 AND "deletedAt" IS NULL LIMIT 1',
-          [input.roomId],
-        );
-        if (!roomRows[0]) throw new NotFoundException('Phòng không tồn tại');
-        this.branchPolicy.assertResourceBranchAccess(user, roomRows[0].branchId);
-        nextTableId = null;
-        nextRoomId = input.roomId;
+    const currentItemsRows = await this.db.query<{
+      id: string; productId: string; productName: string; unit: string | null; baseUnitPrice: string; unitPrice: string; quantity: number;
+      pricingTypeSnapshot: 'FIXED' | 'TIME'; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null;
+    }>(
+      `SELECT oi.id, oi."productId" AS "productId", p.name AS "productName", p.unit AS unit, oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi.quantity,
+              oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes", oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note
+       FROM order_items oi LEFT JOIN products p ON p.id = oi."productId" WHERE oi."orderId" = $1`,
+      [id],
+    );
+    let nextBillItems: CreateOrderInput['billItems'] = currentItemsRows.map((r) => ({
+      lineId: r.id,
+      productId: r.productId,
+      productName: r.productName || '-',
+      unit: r.unit || undefined,
+      baseUnitPrice: this.toMoney(r.baseUnitPrice),
+      unitPrice: this.toMoney(r.unitPrice),
+      quantity: Math.max(1, Math.trunc(Number(r.quantity) || 1)),
+      note: r.note || '',
+      pricingTypeSnapshot: r.pricingTypeSnapshot,
+      timeRateAmountSnapshot: r.timeRateAmountSnapshot == null ? undefined : this.toMoney(r.timeRateAmountSnapshot),
+      timeRateMinutesSnapshot: r.timeRateMinutesSnapshot || undefined,
+      usedMinutes: Math.max(0, Math.trunc(Number(r.usedMinutes) || 0)),
+      startAt: r.startAt,
+      stopAt: r.stopAt,
+    }));
+
+    if (Array.isArray(input.billItems)) {
+      const currentById = new Map(nextBillItems.map((it) => [it.lineId, it]));
+      nextBillItems = input.billItems.map((item) => {
+        const current = currentById.get(item.lineId);
+        return {
+          ...item,
+          startAt: item.startAt ?? current?.startAt ?? null,
+          stopAt: item.stopAt ?? current?.stopAt ?? null,
+        };
+      });
+    } else if (input.billItemsPatch) {
+      const byId = new Map(nextBillItems.map((it) => [it.lineId, it]));
+      for (const idToRemove of input.billItemsPatch.removedItemIds || []) byId.delete(idToRemove);
+      for (const patch of input.billItemsPatch.updatedItems || []) {
+        const current = byId.get(patch.lineId);
+        if (!current) throw new BadRequestException({ message: 'Không tìm thấy dòng món trong hóa đơn', reason: 'line_not_found' });
+        byId.set(patch.lineId, {
+          ...current,
+          ...patch,
+          startAt: patch.startAt ?? current.startAt ?? null,
+          stopAt: patch.stopAt ?? current.stopAt ?? null,
+          lineId: patch.lineId,
+        });
       }
-    }
-    const resolvedTableId = nextTableId === undefined ? rows[0].tableId : nextTableId;
-    const resolvedRoomId = nextRoomId === undefined ? rows[0].roomId : nextRoomId;
-
-    const normalizedItems = input.billItems === undefined ? undefined : this.normalizeOrderItems(input.billItems);
-    const nextSubtotal = normalizedItems
-      ? normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0)
-      : this.toMoney(rows[0].totalAmount);
-    const currentDiscountMode = this.normalizeAdjustmentMode(rows[0].discountMode, 'amount');
-    const currentSurchargeMode = this.normalizeAdjustmentMode(rows[0].surchargeMode, 'amount');
-
-    const nextDiscountMode = this.normalizeAdjustmentMode(
-      input.discountMode,
-      input.discountAmount !== undefined && input.discountValue === undefined ? 'amount' : currentDiscountMode,
-    );
-    const nextSurchargeMode = this.normalizeAdjustmentMode(
-      input.surchargeMode,
-      input.surchargeAmount !== undefined && input.surchargeValue === undefined ? 'amount' : currentSurchargeMode,
-    );
-
-    const nextDiscountValue = this.toRawAdjustmentValue(
-      input.discountValue ?? input.discountAmount ?? rows[0].discountValue,
-    );
-    const nextSurchargeValue = this.toRawAdjustmentValue(
-      input.surchargeValue ?? input.surchargeAmount ?? rows[0].surchargeValue,
-    );
-
-    const nextDiscountAmount = nextDiscountMode === 'percent'
-      ? this.toMoney(Math.min(nextSubtotal, (nextSubtotal * nextDiscountValue) / 100))
-      : Math.min(nextSubtotal, this.toMoney(nextDiscountValue));
-    const nextSubtotalAfterDiscount = Math.max(0, nextSubtotal - nextDiscountAmount);
-    const nextSurchargeAmount = nextSurchargeMode === 'percent'
-      ? this.toMoney((nextSubtotalAfterDiscount * nextSurchargeValue) / 100)
-      : this.toMoney(nextSurchargeValue);
-    const nextTotal = Math.max(0, nextSubtotal - nextDiscountAmount + nextSurchargeAmount);
-    const nextPaidAmount = input.paidAmount === undefined
-      ? this.toMoney(rows[0].paidAmount)
-      : this.toMoney(input.paidAmount);
-    const nextPaymentMethod = input.paymentMethod === undefined
-      ? this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH')
-      : this.normalizePaymentMethod(input.paymentMethod, 'CASH');
-    const shouldSoftDelete = normalizedItems !== undefined && normalizedItems.length === 0;
-    const nextOrderState = shouldSoftDelete ? 'DELETED' : (nextPaidAmount >= nextTotal ? 'PAID' : 'PARTIAL');
-
-    const formatMoney = (value: number) => this.toMoney(value).toLocaleString('vi-VN');
-    const stateLabel = (state: string) => {
-      if (state === 'PAID') return 'Đã thanh toán';
-      if (state === 'PARTIAL') return 'Chưa trả hết';
-      if (state === 'DELETED') return 'Đã xóa';
-      return state;
-    };
-
-    const changeMessages: string[] = [];
-    const previousCustomerName = rows[0].customerName ?? '';
-    const nextCustomerName = input.customerName ?? previousCustomerName;
-    if (nextCustomerName !== previousCustomerName) {
-      changeMessages.push(`Tên khách hàng: ${previousCustomerName || '-'} -> ${nextCustomerName || '-'}`);
-    }
-    if (nextSubtotal !== this.toMoney(rows[0].totalAmount)) {
-      changeMessages.push(`tạm tính: ${formatMoney(this.toMoney(rows[0].totalAmount))} -> ${formatMoney(nextSubtotal)}`);
-    }
-    if (nextDiscountAmount !== this.toMoney(rows[0].discountAmount)) {
-      changeMessages.push(`giảm giá: ${formatMoney(this.toMoney(rows[0].discountAmount))} -> ${formatMoney(nextDiscountAmount)}`);
-    }
-    if (nextDiscountMode !== currentDiscountMode || nextDiscountValue !== this.toRawAdjustmentValue(rows[0].discountValue)) {
-      changeMessages.push(`kiểu giảm giá: ${currentDiscountMode}(${this.toRawAdjustmentValue(rows[0].discountValue)}) -> ${nextDiscountMode}(${nextDiscountValue})`);
-    }
-    if (nextSurchargeAmount !== this.toMoney(rows[0].surchargeAmount)) {
-      changeMessages.push(`phụ phí: ${formatMoney(this.toMoney(rows[0].surchargeAmount))} -> ${formatMoney(nextSurchargeAmount)}`);
-    }
-    if (nextSurchargeMode !== currentSurchargeMode || nextSurchargeValue !== this.toRawAdjustmentValue(rows[0].surchargeValue)) {
-      changeMessages.push(`kiểu phụ phí: ${currentSurchargeMode}(${this.toRawAdjustmentValue(rows[0].surchargeValue)}) -> ${nextSurchargeMode}(${nextSurchargeValue})`);
-    }
-    if (nextTotal !== this.toMoney(rows[0].finalAmount)) {
-      changeMessages.push(`phải thanh toán: ${formatMoney(this.toMoney(rows[0].finalAmount))} -> ${formatMoney(nextTotal)}`);
-    }
-    if (nextPaidAmount !== this.toMoney(rows[0].paidAmount)) {
-      changeMessages.push(`khách thanh toán: ${formatMoney(this.toMoney(rows[0].paidAmount))} -> ${formatMoney(nextPaidAmount)}`);
-    }
-    if (nextPaymentMethod !== this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH')) {
-      changeMessages.push(`phương thức thanh toán: ${this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH')} -> ${nextPaymentMethod}`);
-    }
-    if (nextOrderState !== rows[0].orderState) {
-      changeMessages.push(`trạng thái: ${stateLabel(rows[0].orderState)} -> ${stateLabel(nextOrderState)}`);
-    }
-    if (resolvedTableId !== rows[0].tableId || resolvedRoomId !== rows[0].roomId) {
-      changeMessages.push('phòng/bàn: đã thay đổi');
-    }
-    if (normalizedItems) {
-      changeMessages.push(`danh sách món: ${normalizedItems.length} dòng`);
+      for (const add of input.billItemsPatch.addedItems || []) byId.set(String(add.lineId || randomUUID()), { ...add, lineId: String(add.lineId || randomUUID()) });
+      nextBillItems = Array.from(byId.values());
     }
 
-    const updateDetail = shouldSoftDelete
-      ? 'Đánh dấu xóa hóa đơn do không còn món'
-      : (changeMessages.length ? `Cập nhật hóa đơn: ${changeMessages.join('; ')}` : 'Cập nhật hóa đơn');
-
+    const normalized = await this.normalizeItems(id, nextBillItems);
+    if (normalized.length === 0) {
+      await this.hardDelete(user, id);
+      return { success: true };
+    }
+    const totals = this.computeOrderTotals({
+      itemsSubtotal: normalized.reduce((sum, it) => sum + it.lineTotal, 0),
+      discountMode: input.discountMode ?? rows[0].discountMode,
+      discountValue: input.discountValue,
+      discountAmount: input.discountAmount ?? rows[0].discountValue,
+      surchargeMode: input.surchargeMode ?? rows[0].surchargeMode,
+      surchargeValue: input.surchargeValue,
+      surchargeAmount: input.surchargeAmount ?? rows[0].surchargeValue,
+      paidAmount: input.paidAmount ?? rows[0].paidAmount,
+      orderState: input.orderState,
+    });
+    const paymentMethod = this.normalizePaymentMethod(input.paymentMethod ?? rows[0].paymentMethod, 'CASH');
     await this.db.withTransaction(async (tx) => {
       await tx.query(
-        `UPDATE orders
-       SET "customerName" = COALESCE($2, "customerName"),
-           "totalAmount" = $3,
-           "discountAmount" = $4,
-           "discountMode" = $5::"OrderAdjustmentMode",
-           "discountValue" = $6,
-           "surchargeAmount" = $7,
-           "surchargeMode" = $8::"OrderAdjustmentMode",
-           "surchargeValue" = $9,
-           "finalAmount" = $10,
-           "paidAmount" = $11,
-           "paymentMethod" = $12::"PaymentMethod",
-           "orderState" = $13::"OrderLifecycleState",
-           "tableId" = $14,
-           "roomId" = $15,
-              "updatedAt" = NOW()
-        WHERE id = $1`,
-      [
-        id,
-        input.customerName ?? null,
-        nextSubtotal,
-        nextDiscountAmount,
-        nextDiscountMode,
-        nextDiscountValue,
-        nextSurchargeAmount,
-        nextSurchargeMode,
-        nextSurchargeValue,
-        nextTotal,
-        nextPaidAmount,
-        nextPaymentMethod,
-        nextOrderState,
-        resolvedTableId,
-        resolvedRoomId,
-      ],
+        `UPDATE orders SET "tableId" = $2, "roomId" = $3, "customerName" = $4, "discountMode" = $5::"OrderAdjustmentMode", "discountValue" = $6,
+                           "discountAmount" = $7, "surchargeMode" = $8::"OrderAdjustmentMode", "surchargeValue" = $9, "surchargeAmount" = $10,
+                           "totalAmount" = $11, "finalAmount" = $12, "paidAmount" = $13, "paymentMethod" = $14::"PaymentMethod", "orderState" = $15::"OrderLifecycleState", "updatedAt" = NOW()
+         WHERE id = $1`,
+        [
+          id,
+          input.entityType === 'TABLE' ? input.tableId ?? rows[0].tableId : null,
+          input.entityType === 'ROOM' ? input.roomId ?? rows[0].roomId : null,
+          input.customerName ?? rows[0].customerName,
+          totals.discountMode,
+          totals.discountValue,
+          totals.discountAmount,
+          totals.surchargeMode,
+          totals.surchargeValue,
+          totals.surchargeAmount,
+          totals.subtotalAmount,
+          totals.finalAmount,
+          totals.paidAmount,
+          paymentMethod,
+          totals.orderState,
+        ],
       );
-
-      if (normalizedItems) {
-        await this.replaceOrderItems(tx, id, normalizedItems);
-      }
-
-      await this.logAction(tx, {
-        orderId: id,
-        action: shouldSoftDelete ? 'DELETE_ORDER' : 'UPDATE_ORDER',
-        detail: updateDetail,
-        snapshot: {
-          customerName: input.customerName ?? undefined,
-          subtotalAmount: nextSubtotal,
-          discountAmount: nextDiscountAmount,
-          discountMode: nextDiscountMode,
-          discountValue: nextDiscountValue,
-          surchargeAmount: nextSurchargeAmount,
-          surchargeMode: nextSurchargeMode,
-          surchargeValue: nextSurchargeValue,
-          totalAmount: nextTotal,
-          paidAmount: nextPaidAmount,
-          paymentMethod: nextPaymentMethod,
-          orderState: nextOrderState,
-          itemCount: normalizedItems?.length,
-        },
-        userId: user.id,
-      });
+      await this.replaceItems(tx, id, normalized);
+      await this.logAction(tx, { orderId: id, action: 'UPDATE_ORDER', detail: 'Cập nhật hóa đơn', userId: user.id, snapshot: { itemCount: normalized.length } });
     });
-
     return { success: true };
-  }
-
-  async printOrder(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; "branchId": string | null }>(
-      'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
-      [id],
-    );
-    if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
-    this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-
-    await this.db.withTransaction(async (tx) => {
-      await this.logAction(tx, {
-        orderId: id,
-        action: 'PRINT_ORDER',
-        detail: 'In hóa đơn',
-        userId: user.id,
-      });
-    });
-
-    return { success: true };
-  }
-
-  async getOrderLogs(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; "branchId": string | null }>(
-      'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
-      [id],
-    );
-    if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
-    this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-
-    const logs = await this.db.query<{
-      id: string;
-      action: string;
-      detail: string | null;
-      snapshot: unknown;
-      "createdBy": string | null;
-      "createdByName": string | null;
-      "createdAt": string;
-    }>(
-      `SELECT l.id,
-              l.action,
-              l.detail,
-              l.snapshot,
-              l."createdBy",
-              COALESCE(NULLIF(u."fullName", ''), u.username, l."createdBy") AS "createdByName",
-              l."createdAt"
-       FROM order_logs l
-       LEFT JOIN users u ON u.id = l."createdBy"
-        WHERE "orderId" = $1
-       ORDER BY l."createdAt" DESC`,
-      [id],
-    );
-
-    return logs;
   }
 
   async markDeleted(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; "branchId": string | null }>(
-      'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
-      [id],
-    );
+    const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-
+    if (rows[0].orderState === 'DELETED') return { success: true };
     await this.db.withTransaction(async (tx) => {
-      await tx.query('UPDATE orders SET "orderState" = $2::"OrderLifecycleState", "updatedAt" = NOW() WHERE id = $1', [
-        id,
-        'DELETED',
-      ]);
-
-      await this.logAction(tx, {
-        orderId: id,
-        action: 'DELETE_ORDER',
-        detail: 'Đánh dấu xóa hóa đơn',
-        userId: user.id,
-      });
+      await tx.query('DELETE FROM order_items WHERE "orderId" = $1', [id]);
+      await tx.query('UPDATE orders SET "orderState" = $2::"OrderLifecycleState", "updatedAt" = NOW() WHERE id = $1', [id, 'DELETED']);
+      await this.logAction(tx, { orderId: id, action: 'DELETE_ORDER', detail: 'Xóa hóa đơn', userId: user.id });
     });
-
     return { success: true };
   }
 
   async hardDelete(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; "branchId": string | null }>(
-      'SELECT id, "branchId" FROM orders WHERE id = $1 LIMIT 1',
-      [id],
-    );
+    const rows = await this.db.query<{ id: string; branchId: string | null }>('SELECT id, "branchId" AS "branchId" FROM orders WHERE id = $1 LIMIT 1', [id]);
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
-
     await this.db.query('DELETE FROM orders WHERE id = $1', [id]);
-
     return { success: true };
+  }
+  async printOrder(user: CurrentUser, id: string) {
+    const rows = await this.db.query<{ id: string; branchId: string | null }>('SELECT id, "branchId" AS "branchId" FROM orders WHERE id = $1 LIMIT 1', [id]);
+    if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+    await this.db.withTransaction(async (tx) => {
+      await this.logAction(tx, { orderId: id, action: 'PRINT_ORDER', detail: 'In hóa đơn', userId: user.id });
+    });
+    return { success: true };
+  }
+
+  async getOrderLogs(user: CurrentUser, id: string) {
+    const rows = await this.db.query<{ id: string; branchId: string | null }>('SELECT id, "branchId" AS "branchId" FROM orders WHERE id = $1 LIMIT 1', [id]);
+    if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
+    this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+    return this.db.query<{
+      id: string; action: string; detail: string | null; snapshot: unknown; createdBy: string | null; createdByName: string | null; createdAt: string;
+    }>(
+      `SELECT l.id, l.action, l.detail, l.snapshot, l."createdBy" AS "createdBy", COALESCE(NULLIF(u."fullName", ''), u.username, l."createdBy") AS "createdByName", l."createdAt"::text AS "createdAt"
+       FROM order_logs l LEFT JOIN users u ON u.id = l."createdBy" WHERE l."orderId" = $1 ORDER BY l."createdAt" DESC`,
+      [id],
+    );
   }
 }

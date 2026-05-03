@@ -5,6 +5,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { Client } from 'pg';
 import * as bcrypt from 'bcryptjs';
+import { randomUUID } from 'crypto';
 import { AppModule } from '../src/app.module';
 
 describe('Order payment state integration', () => {
@@ -446,5 +447,293 @@ describe('Order payment state integration', () => {
     );
 
     expect(autoLog).toBeTruthy();
+  });
+
+  it('supports independent timer sessions for multiple TIME lines of same service', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const timeProductRes = await request(app.getHttpServer())
+      .post('/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        type: 'TIME',
+        name: `E2E TIME ${Date.now()}`,
+        isActive: true,
+        timeRateAmount: 30000,
+        timeRateMinutes: 60,
+        branchConfigs: [{ branchId, isActive: true }],
+      })
+      .expect(201);
+
+    const timeProductId = timeProductRes.body?.id as string;
+    const timeProductName = (timeProductRes.body?.name as string) || 'TIME E2E';
+    expect(timeProductId).toBeTruthy();
+
+    const lineId1 = randomUUID();
+    const lineId2 = randomUUID();
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach TIME sessions',
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: lineId1,
+            productId: timeProductId,
+            productName: timeProductName,
+            unitPrice: 30000,
+            quantity: 1,
+            pricingTypeSnapshot: 'TIME',
+            timeRateAmountSnapshot: 30000,
+            timeRateMinutesSnapshot: 60,
+            usedMinutes: 0,
+            note: '',
+          },
+          {
+            lineId: lineId2,
+            productId: timeProductId,
+            productName: timeProductName,
+            unitPrice: 30000,
+            quantity: 1,
+            pricingTypeSnapshot: 'TIME',
+            timeRateAmountSnapshot: 30000,
+            timeRateMinutesSnapshot: 60,
+            usedMinutes: 0,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = createRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    await request(app.getHttpServer())
+      .post(`/orders/${orderId}/items/${lineId2}/timer/start`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/orders/${orderId}/items/${lineId2}/timer/stop`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/orders/${orderId}/items/${lineId1}/timer/start`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/orders/${orderId}/items/${lineId1}/timer/stop`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
+
+    const detailRes = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    const items = Array.isArray(detailRes.body?.items) ? detailRes.body.items : [];
+    const line1 = items.find((item: { lineId: string }) => item.lineId === lineId1);
+    const line2 = items.find((item: { lineId: string }) => item.lineId === lineId2);
+
+    expect(line1).toBeTruthy();
+    expect(line2).toBeTruthy();
+    expect(line1?.pricingTypeSnapshot).toBe('TIME');
+    expect(line2?.pricingTypeSnapshot).toBe('TIME');
+    expect(Number(line1?.usedMinutes || 0)).toBeGreaterThan(0);
+    expect(Number(line2?.usedMinutes || 0)).toBeGreaterThan(0);
+    expect(line1?.timerStatus).toBe('STOPPED');
+    expect(line2?.timerStatus).toBe('STOPPED');
+  });
+
+  it('starts timer by clientLineId for existing TIME line', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const timeProductRes = await request(app.getHttpServer())
+      .post('/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        type: 'TIME',
+        name: `E2E TIME START BY CLIENT ${Date.now()}`,
+        isActive: true,
+        timeRateAmount: 45000,
+        timeRateMinutes: 60,
+        branchConfigs: [{ branchId, isActive: true }],
+      })
+      .expect(201);
+
+    const timeProductId = timeProductRes.body?.id as string;
+    const timeProductName = (timeProductRes.body?.name as string) || 'TIME E2E';
+    const clientLineId = randomUUID();
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach start by clientLine existing',
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: clientLineId,
+            productId: timeProductId,
+            productName: timeProductName,
+            unitPrice: 45000,
+            quantity: 1,
+            pricingTypeSnapshot: 'TIME',
+            timeRateAmountSnapshot: 45000,
+            timeRateMinutesSnapshot: 60,
+            usedMinutes: 0,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = createRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    const startRes = await request(app.getHttpServer())
+      .post(`/orders/${orderId}/commands/start-time-line`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        clientLineId,
+        lineSnapshot: {
+          productId: timeProductId,
+          productName: timeProductName,
+          pricingTypeSnapshot: 'TIME',
+          unitPrice: 45000,
+          timeRateAmountSnapshot: 45000,
+          timeRateMinutesSnapshot: 60,
+          note: '',
+        },
+      })
+      .expect(201);
+
+    expect(startRes.body?.clientLineId).toBe(clientLineId);
+    expect(startRes.body?.orderItemId).toBe(clientLineId);
+    expect(startRes.body?.timerStatus).toBe('RUNNING');
+    expect(Number(startRes.body?.lineTotal || 0)).toBeGreaterThan(0);
+  });
+
+  it('persists new TIME line and starts timer by clientLineId for unsaved line', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const timeProductRes = await request(app.getHttpServer())
+      .post('/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        type: 'TIME',
+        name: `E2E TIME UNSAVED ${Date.now()}`,
+        isActive: true,
+        timeRateAmount: 30000,
+        timeRateMinutes: 30,
+        branchConfigs: [{ branchId, isActive: true }],
+      })
+      .expect(201);
+
+    const timeProductId = timeProductRes.body?.id as string;
+    const timeProductName = (timeProductRes.body?.name as string) || 'TIME E2E';
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach start by clientLine unsaved',
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [],
+        branchId,
+      })
+      .expect(400);
+
+    expect(createRes.body?.message).toContain('ít nhất một món');
+
+    const seedOrderRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach seed order for unsaved line',
+        paidAmount: 0,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: randomUUID(),
+            productId,
+            productName,
+            unit: productUnit,
+            baseUnitPrice: productPrice,
+            unitPrice: productPrice,
+            quantity: 1,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = seedOrderRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    const clientLineId = `draft-${Date.now()}`;
+    const startRes = await request(app.getHttpServer())
+      .post(`/orders/${orderId}/commands/start-time-line`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        clientLineId,
+        lineSnapshot: {
+          productId: timeProductId,
+          productName: timeProductName,
+          pricingTypeSnapshot: 'TIME',
+          unitPrice: 30000,
+          timeRateAmountSnapshot: 30000,
+          timeRateMinutesSnapshot: 30,
+          note: 'line unsaved',
+        },
+      })
+      .expect(201);
+
+    expect(startRes.body?.clientLineId).toBe(clientLineId);
+    expect(startRes.body?.orderItemId).toBeTruthy();
+    expect(startRes.body?.orderItemId).not.toBe(clientLineId);
+    expect(startRes.body?.timerStatus).toBe('RUNNING');
+    expect(Number(startRes.body?.lineTotal || 0)).toBe(30000);
+
+    await request(app.getHttpServer())
+      .post(`/orders/${orderId}/items/${startRes.body?.orderItemId}/timer/stop`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(201);
   });
 });

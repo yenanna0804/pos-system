@@ -49,6 +49,11 @@ export class TablesController {
     return this.tablesService.deleteArea(user, id);
   }
 
+  @Get('areas/:id/delete-impact')
+  getAreaDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.tablesService.getAreaDeleteImpact(user, id);
+  }
+
   @Get('rooms')
   listRooms(@CurrentUser() user: CurrentUserType, @Query('areaId') areaId?: string, @Query('branchId') branchId?: string) {
     return this.tablesService.listRooms(user, { areaId, branchId });
@@ -67,6 +72,11 @@ export class TablesController {
   @Delete('rooms/:id')
   deleteRoom(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.deleteRoom(user, id);
+  }
+
+  @Get('rooms/:id/delete-impact')
+  getRoomDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.tablesService.getRoomDeleteImpact(user, id);
   }
 
   @Get('dining-tables')
@@ -92,6 +102,11 @@ export class TablesController {
   @Get('dining-tables/options')
   listDiningTableOptions(@CurrentUser() user: CurrentUserType, @Query('branchId') branchId?: string) {
     return this.tablesService.listDiningTableOptions(user, { branchId });
+  }
+
+  @Get('dining-tables/:id/delete-impact')
+  getDiningTableDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
+    return this.tablesService.getDiningTableDeleteImpact(user, id);
   }
 
   @Post('dining-tables')

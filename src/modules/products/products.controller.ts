@@ -19,7 +19,7 @@ import { CurrentUser } from '../../common/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
 
 type CreateProductDto = {
-  type?: 'SINGLE' | 'COMBO';
+  type?: 'SINGLE' | 'COMBO' | 'TIME';
   autoPrice?: boolean;
   sku?: string;
   name: string;
@@ -28,6 +28,8 @@ type CreateProductDto = {
   weight?: number;
   costPrice?: number;
   price: number;
+  timeRateAmount?: number;
+  timeRateMinutes?: number;
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
   comboItems?: { itemProductId: string; quantity: number; itemName?: string; itemUnit?: string }[];
@@ -53,7 +55,7 @@ export class ProductsController {
     @CurrentUser() user: CurrentUserType,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
-    @Query('type') type?: 'SINGLE' | 'COMBO',
+    @Query('type') type?: 'SINGLE' | 'COMBO' | 'TIME',
     @Query('categoryId') categoryId?: string,
     @Query('stockStatus') stockStatus?: 'all' | 'in_stock' | 'out_of_stock',
     @Query('branchId') branchId?: string,

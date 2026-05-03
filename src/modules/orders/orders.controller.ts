@@ -5,7 +5,7 @@ import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
 import { OrdersService } from './orders.service';
 
 type CreateOrderDto = {
-  entityType: 'TABLE' | 'ROOM';
+  entityType?: 'TABLE' | 'ROOM';
   tableId?: string;
   roomId?: string;
   customerName?: string;
@@ -18,6 +18,7 @@ type CreateOrderDto = {
   surchargeValue?: number;
   paidAmount?: number;
   paymentMethod?: 'CASH' | 'BANKING';
+  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL';
   billItems: {
     lineId: string;
     productId: string;
@@ -27,6 +28,12 @@ type CreateOrderDto = {
     unitPrice: number;
     quantity: number;
     note: string;
+    pricingTypeSnapshot?: 'FIXED' | 'TIME';
+    timeRateAmountSnapshot?: number;
+    timeRateMinutesSnapshot?: number;
+    usedMinutes?: number;
+    startAt?: string | null;
+    stopAt?: string | null;
   }[];
   branchId?: string;
 };
@@ -45,6 +52,7 @@ type UpdateOrderDto = {
   surchargeValue?: number;
   paidAmount?: number;
   paymentMethod?: 'CASH' | 'BANKING';
+  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL';
   billItems?: {
     lineId: string;
     productId: string;
@@ -54,7 +62,48 @@ type UpdateOrderDto = {
     unitPrice: number;
     quantity: number;
     note: string;
+    pricingTypeSnapshot?: 'FIXED' | 'TIME';
+    timeRateAmountSnapshot?: number;
+    timeRateMinutesSnapshot?: number;
+    usedMinutes?: number;
+    startAt?: string | null;
+    stopAt?: string | null;
   }[];
+  billItemsPatch?: {
+    addedItems?: {
+      lineId?: string;
+      productId: string;
+      productName: string;
+      unit?: string;
+      baseUnitPrice?: number;
+      unitPrice: number;
+      quantity: number;
+      note: string;
+      pricingTypeSnapshot?: 'FIXED' | 'TIME';
+      timeRateAmountSnapshot?: number;
+      timeRateMinutesSnapshot?: number;
+      usedMinutes?: number;
+      startAt?: string | null;
+      stopAt?: string | null;
+    }[];
+    updatedItems?: {
+      lineId: string;
+      productId?: string;
+      productName?: string;
+      unit?: string;
+      baseUnitPrice?: number;
+      unitPrice?: number;
+      quantity?: number;
+      note?: string;
+      pricingTypeSnapshot?: 'FIXED' | 'TIME';
+      timeRateAmountSnapshot?: number;
+      timeRateMinutesSnapshot?: number;
+      usedMinutes?: number;
+      startAt?: string | null;
+      stopAt?: string | null;
+    }[];
+    removedItemIds?: string[];
+  };
 };
 
 @Controller()
@@ -129,4 +178,5 @@ export class OrdersController {
   hardDeleteOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.ordersService.hardDelete(user, id);
   }
+
 }

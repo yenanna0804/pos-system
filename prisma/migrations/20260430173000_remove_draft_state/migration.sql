@@ -5,14 +5,6 @@ UPDATE orders
 SET "orderState" = 'PARTIAL'
 WHERE "orderState"::text = 'DRAFT';
 
-UPDATE order_logs
-SET action = 'CREATE_ORDER'
-WHERE action::text = 'CREATE_DRAFT';
-
-UPDATE order_logs
-SET action = 'CREATE_ORDER'
-WHERE action::text = 'CREATE';
-
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'OrderLifecycleState_old') THEN
@@ -54,7 +46,12 @@ BEGIN
     ) THEN
       ALTER TABLE order_logs
         ALTER COLUMN action TYPE "OrderLogAction"
-        USING (action::text::"OrderLogAction");
+        USING (
+          CASE
+            WHEN action::text IN ('CREATE_DRAFT', 'CREATE') THEN 'CREATE_ORDER'
+            ELSE action::text
+          END::"OrderLogAction"
+        );
     END IF;
     DROP TYPE "OrderLogAction_old";
   ELSIF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'OrderLogAction') THEN
@@ -63,7 +60,12 @@ BEGIN
       CREATE TYPE "OrderLogAction" AS ENUM ('CREATE_ORDER', 'UPDATE_ORDER', 'PRINT_ORDER', 'DELETE_ORDER', 'PAY_PARTIAL', 'PAY_FULL');
       ALTER TABLE order_logs
         ALTER COLUMN action TYPE "OrderLogAction"
-        USING (action::text::"OrderLogAction");
+        USING (
+          CASE
+            WHEN action::text IN ('CREATE_DRAFT', 'CREATE') THEN 'CREATE_ORDER'
+            ELSE action::text
+          END::"OrderLogAction"
+        );
       DROP TYPE "OrderLogAction_old";
     END IF;
   END IF;

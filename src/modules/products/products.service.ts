@@ -6,7 +6,7 @@ import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
 
 type CreateProductInput = {
-  type?: 'SINGLE' | 'COMBO';
+  type?: 'SINGLE' | 'COMBO' | 'TIME';
   autoPrice?: boolean;
   sku?: string;
   name: string;
@@ -15,6 +15,8 @@ type CreateProductInput = {
   weight?: number;
   costPrice?: number;
   price: number;
+  timeRateAmount?: number;
+  timeRateMinutes?: number;
   isActive?: boolean;
   branchConfigs?: { branchId: string; isActive: boolean; stock?: number }[];
   comboItems?: { itemProductId: string; quantity: number; itemName?: string; itemUnit?: string }[];
@@ -25,7 +27,7 @@ type CreateProductInput = {
 type ListProductsParams = {
   page: number;
   pageSize: number;
-  type?: 'SINGLE' | 'COMBO';
+  type?: 'SINGLE' | 'COMBO' | 'TIME';
   categoryId?: string;
   stockStatus?: 'all' | 'in_stock' | 'out_of_stock';
   branchId?: string;
@@ -49,7 +51,7 @@ type UpdateCategoryInput = {
 type ProductDeleteImpactOrder = {
   orderId: string;
   orderCode: string;
-  orderState: 'PARTIAL' | 'PAID' | 'DELETED';
+  orderState: 'DRAFT' | 'PARTIAL' | 'PAID' | 'DELETED';
   createdAt: string;
   itemCount: number;
 };
@@ -204,6 +206,7 @@ export class ProductsService {
     const baseCte = `
       WITH product_rows AS (
         SELECT p.id, p.sku, p.name, p."type", p."autoPrice", p.price, p."costPrice", p.unit, p.weight,
+               p."timeRateAmount", p."timeRateMinutes",
                COALESCE(SUM(pb.stock), 0) AS stock,
                p."isActive", p."createdAt",
                COALESCE(p."imageThumb", p."imageUrl") AS "imageThumb",
@@ -256,6 +259,7 @@ export class ProductsService {
         ...item,
         price: this.toMoney(item.price),
         costPrice: item.costPrice == null ? null : this.toMoney(item.costPrice),
+        timeRateAmount: item.timeRateAmount == null ? null : this.toMoney(item.timeRateAmount),
       };
       if (!scopedBranchId) return baseItem;
       const rawConfigs = Array.isArray(item.branchConfigs)
@@ -288,6 +292,7 @@ export class ProductsService {
     const scopedBranchId = this.branchPolicy.resolveReadBranchId(user);
     const rows = await this.db.query(
       `SELECT p.id, p.sku, p.name, p."type", p."autoPrice", p.price, p."costPrice", p.unit, p.weight,
+              p."timeRateAmount", p."timeRateMinutes",
               COALESCE(SUM(pb.stock), 0) AS stock,
               p."isActive", p."createdAt",
               p."imageUrl", p."imageThumb",
@@ -351,6 +356,7 @@ export class ProductsService {
         ...rows[0],
         price: this.toMoney(rows[0].price),
         costPrice: rows[0].costPrice == null ? null : this.toMoney(rows[0].costPrice),
+        timeRateAmount: rows[0].timeRateAmount == null ? null : this.toMoney(rows[0].timeRateAmount),
         stock: filteredConfigs.reduce((sum: number, cfg: any) => sum + Number(cfg?.stock || 0), 0),
         branchConfigs: filteredConfigs,
       };
@@ -360,6 +366,7 @@ export class ProductsService {
       ...rows[0],
       price: this.toMoney(rows[0].price),
       costPrice: rows[0].costPrice == null ? null : this.toMoney(rows[0].costPrice),
+      timeRateAmount: rows[0].timeRateAmount == null ? null : this.toMoney(rows[0].timeRateAmount),
     };
   }
 
@@ -414,11 +421,13 @@ export class ProductsService {
       throw new BadRequestException('Mã hàng hóa không đúng định dạng');
     }
 
-    if (input.unit && !UNIT_REGEX.test(input.unit.trim())) {
+    const productType = input.type === 'COMBO' || input.type === 'TIME' ? input.type : 'SINGLE';
+
+    if (productType !== 'TIME' && input.unit && !UNIT_REGEX.test(input.unit.trim())) {
       throw new BadRequestException('Đơn vị tính không đúng định dạng');
     }
 
-    if (input.type && !['SINGLE', 'COMBO'].includes(input.type)) {
+    if (input.type && !['SINGLE', 'COMBO', 'TIME'].includes(input.type)) {
       throw new BadRequestException('Loại hàng hóa không hợp lệ');
     }
 
@@ -433,8 +442,19 @@ export class ProductsService {
     }
 
     const price = this.toMoney(input.price);
-    if (!Number.isFinite(price) || price <= 0) {
+    if (productType !== 'TIME' && (!Number.isFinite(price) || price <= 0)) {
       throw new BadRequestException('Giá bán phải lớn hơn 0');
+    }
+
+    if (productType === 'TIME') {
+      const timeRateAmount = this.toMoney(input.timeRateAmount);
+      const timeRateMinutes = Math.trunc(Number(input.timeRateMinutes) || 0);
+      if (timeRateAmount <= 0) {
+        throw new BadRequestException('Giá dịch vụ tính giờ phải lớn hơn 0');
+      }
+      if (timeRateMinutes <= 0) {
+        throw new BadRequestException('Thời lượng chuẩn tính giờ phải lớn hơn 0');
+      }
     }
   }
 
@@ -471,6 +491,10 @@ export class ProductsService {
       throw new BadRequestException('Tạm thời chưa hỗ trợ thêm combo lồng trong combo');
     }
 
+    if (rows.some((item) => item.type === 'TIME')) {
+      throw new BadRequestException('Không hỗ trợ thêm dịch vụ tính giờ vào combo');
+    }
+
     if (!this.branchPolicy.isAdmin(user)) {
       const branchRows = await this.db.query<{ "productId": string }>(
         'SELECT "productId" FROM product_branches WHERE "branchId" = $1 AND "isActive" = true AND "productId" = ANY($2::text[])',
@@ -505,7 +529,7 @@ export class ProductsService {
       }
     }
 
-    const productType = input.type === 'COMBO' ? 'COMBO' : 'SINGLE';
+    const productType = input.type === 'COMBO' || input.type === 'TIME' ? input.type : 'SINGLE';
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
     let comboItemsPayload: { itemProductId: string; quantity: number; itemPrice: number }[] = [];
@@ -517,14 +541,17 @@ export class ProductsService {
         finalPrice = comboPayload.autoPrice;
       }
     }
+    if (productType === 'TIME') {
+      finalPrice = this.toMoney(input.timeRateAmount);
+    }
 
     const id = randomUUID();
     const sku = input.sku?.trim() || `HH${Date.now()}`;
     const rows = await this.db.query(
       `INSERT INTO products
-       (id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "updatedAt", "imageUrl", "imageThumb")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW(), $13, $14)
-       RETURNING id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"`,
+       (id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "timeRateAmount", "timeRateMinutes", "createdAt", "updatedAt", "imageUrl", "imageThumb")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW(), $15, $16)
+       RETURNING id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "timeRateAmount", "timeRateMinutes", "createdAt", "imageUrl", "imageThumb"`,
       [
         id,
         input.name.trim(),
@@ -534,10 +561,12 @@ export class ProductsService {
         finalPrice,
         input.costPrice != null ? this.toMoney(input.costPrice) : null,
         input.categoryId || null,
-        input.unit?.trim() || null,
-        input.weight != null ? Number(input.weight) : null,
+        productType === 'TIME' ? null : (input.unit?.trim() || null),
+        productType === 'TIME' ? null : (input.weight != null ? Number(input.weight) : null),
         totalStock,
         input.isActive ?? true,
+        productType === 'TIME' ? this.toMoney(input.timeRateAmount) : null,
+        productType === 'TIME' ? Math.max(1, Math.trunc(Number(input.timeRateMinutes) || 0)) : null,
         input.imageUrl ?? null,
         input.imageThumb ?? null,
       ],
@@ -595,7 +624,7 @@ export class ProductsService {
       }
     }
 
-    const productType = input.type === 'COMBO' ? 'COMBO' : 'SINGLE';
+    const productType = input.type === 'COMBO' || input.type === 'TIME' ? input.type : 'SINGLE';
     const uniqueBranchConfigs = await this.normalizeBranchConfigs(input.branchConfigs, user);
     const totalStock = uniqueBranchConfigs.reduce((sum, item) => sum + item.stock, 0);
     let comboItemsPayload: { itemProductId: string; quantity: number; itemPrice: number }[] = [];
@@ -610,12 +639,17 @@ export class ProductsService {
         finalPrice = comboPayload.autoPrice;
       }
     }
+    if (productType === 'TIME') {
+      finalPrice = this.toMoney(input.timeRateAmount);
+    }
 
     await this.db.query(
       `UPDATE products
        SET name = $1, sku = $2, "type" = $3, "autoPrice" = $4, price = $5, "costPrice" = $6, "categoryId" = $7,
-           unit = $8, weight = $9, stock = $10, "isActive" = $11, "updatedAt" = NOW(), "imageUrl" = $12, "imageThumb" = $13
-       WHERE id = $14`,
+           unit = $8, weight = $9, stock = $10, "isActive" = $11,
+           "timeRateAmount" = $12, "timeRateMinutes" = $13,
+           "updatedAt" = NOW(), "imageUrl" = $14, "imageThumb" = $15
+       WHERE id = $16`,
       [
         input.name.trim(),
         input.sku?.trim() || `HH${Date.now()}`,
@@ -624,10 +658,12 @@ export class ProductsService {
         finalPrice,
         input.costPrice != null ? this.toMoney(input.costPrice) : null,
         input.categoryId || null,
-        input.unit?.trim() || null,
-        input.weight != null ? Number(input.weight) : null,
+        productType === 'TIME' ? null : (input.unit?.trim() || null),
+        productType === 'TIME' ? null : (input.weight != null ? Number(input.weight) : null),
         totalStock,
         input.isActive ?? true,
+        productType === 'TIME' ? this.toMoney(input.timeRateAmount) : null,
+        productType === 'TIME' ? Math.max(1, Math.trunc(Number(input.timeRateMinutes) || 0)) : null,
         input.imageUrl ?? null,
         input.imageThumb ?? null,
         id,
@@ -655,7 +691,7 @@ export class ProductsService {
     }
 
     const rows = await this.db.query(
-      `SELECT id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "createdAt", "imageUrl", "imageThumb"
+      `SELECT id, name, sku, "type", "autoPrice", price, "costPrice", "categoryId", unit, weight, stock, "isActive", "timeRateAmount", "timeRateMinutes", "createdAt", "imageUrl", "imageThumb"
        FROM products
        WHERE id = $1
        LIMIT 1`,
@@ -687,7 +723,7 @@ export class ProductsService {
     const result = await this.db.withTransaction(async (tx) => {
       const impactedOrders = await tx.query<{
         orderId: string;
-        orderState: 'PARTIAL' | 'PAID' | 'DELETED';
+        orderState: 'DRAFT' | 'PARTIAL' | 'PAID' | 'DELETED';
         paidAmount: string;
         discountMode: 'percent' | 'amount';
         discountValue: string;
