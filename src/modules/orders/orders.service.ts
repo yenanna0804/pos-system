@@ -36,6 +36,8 @@ type CreateOrderInput = {
     usedMinutes?: number;
     startAt?: string | null;
     stopAt?: string | null;
+    lineDiscountAmount?: number;
+    lineSurchargeAmount?: number;
   }[];
   branchId?: string;
   applySaveStatusRules?: boolean;
@@ -58,6 +60,8 @@ type UpdateOrderInput = Partial<CreateOrderInput> & {
       usedMinutes?: number;
       startAt?: string | null;
       stopAt?: string | null;
+      lineDiscountAmount?: number;
+      lineSurchargeAmount?: number;
     }[];
     updatedItems?: (Partial<CreateOrderInput['billItems'][number]> & { lineId: string })[];
     removedItemIds?: string[];
@@ -80,10 +84,29 @@ type NormalizedItem = {
   usedMinutes: number;
   startAt: string | null;
   stopAt: string | null;
+  lineDiscountAmount: number;
+  lineSurchargeAmount: number;
   note: string;
 };
 
 type OrdersExecutor = { query<T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<T[]> };
+
+type ItemLogSnapshot = {
+  lineId: string;
+  productId: string;
+  productName: string;
+  pricingTypeSnapshot: 'FIXED' | 'TIME';
+  quantity: number;
+  baseUnitPrice: number;
+  unitPrice: number;
+  lineTotal: number;
+  lineDiscountAmount: number;
+  lineSurchargeAmount: number;
+  usedMinutes: number;
+  startAt: string | null;
+  stopAt: string | null;
+  note: string;
+};
 
 @Injectable()
 export class OrdersService {
@@ -188,6 +211,9 @@ export class OrdersService {
           ? Math.max(0, Math.trunc(usedMinutesFromTime))
           : Math.max(0, Math.trunc(Number(item.usedMinutes) || 0));
         const unitPrice = this.toMoney(item.unitPrice ?? rateAmount);
+        const baseLineTotal = this.calculateTimePrice(rateAmount, rateMinutes, usedMinutes);
+        const actualLineTotal = this.calculateTimePrice(unitPrice, rateMinutes, usedMinutes);
+        const timeAdjustmentFactor = usedMinutes / rateMinutes;
         normalized.push({
           clientLineId: String(item.lineId || ''),
           lineId,
@@ -198,18 +224,23 @@ export class OrdersService {
           pricingTypeSnapshot: 'TIME',
           baseUnitPrice: rateAmount,
           unitPrice,
-          lineTotal: this.calculateTimePrice(unitPrice, rateMinutes, usedMinutes),
+          lineTotal: actualLineTotal,
           timeRateAmountSnapshot: rateAmount,
           timeRateMinutesSnapshot: rateMinutes,
           usedMinutes,
           startAt: item.startAt || null,
           stopAt: item.stopAt || null,
+          lineDiscountAmount: Math.max(0, this.toMoney((rateAmount - unitPrice) * timeAdjustmentFactor)),
+          lineSurchargeAmount: Math.max(0, this.toMoney((unitPrice - rateAmount) * timeAdjustmentFactor)),
           note: item.note || '',
         });
         continue;
       }
       const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
       const unitPrice = this.toMoney(item.unitPrice);
+      const baseUnitPrice = this.toMoney(item.baseUnitPrice ?? unitPrice);
+      const baseLineTotal = quantity * baseUnitPrice;
+      const actualLineTotal = quantity * unitPrice;
       normalized.push({
         clientLineId: String(item.lineId || ''),
         lineId,
@@ -218,14 +249,16 @@ export class OrdersService {
         unit: item.unit || product.unit || undefined,
         quantity,
         pricingTypeSnapshot: 'FIXED',
-        baseUnitPrice: this.toMoney(item.baseUnitPrice ?? unitPrice),
+        baseUnitPrice,
         unitPrice,
-        lineTotal: quantity * unitPrice,
+        lineTotal: actualLineTotal,
         timeRateAmountSnapshot: null,
         timeRateMinutesSnapshot: null,
         usedMinutes: 0,
         startAt: item.startAt || null,
         stopAt: item.stopAt || null,
+        lineDiscountAmount: Math.max(0, this.toMoney(baseLineTotal - actualLineTotal)),
+        lineSurchargeAmount: Math.max(0, this.toMoney(actualLineTotal - baseLineTotal)),
         note: item.note || '',
       });
     }
@@ -308,12 +341,46 @@ export class OrdersService {
     return { subtotalAmount, discountMode, discountValue, discountAmount, surchargeMode, surchargeValue, surchargeAmount, finalAmount, paidAmount, orderState };
   }
 
+  private mapItemForSnapshot(item: {
+    lineId: string;
+    productId: string;
+    productName: string;
+    pricingTypeSnapshot: 'FIXED' | 'TIME';
+    quantity: number;
+    baseUnitPrice: number;
+    unitPrice: number;
+    lineTotal: number;
+    lineDiscountAmount: number;
+    lineSurchargeAmount: number;
+    usedMinutes: number;
+    startAt: string | null;
+    stopAt: string | null;
+    note: string;
+  }): ItemLogSnapshot {
+    return {
+      lineId: item.lineId,
+      productId: item.productId,
+      productName: item.productName,
+      pricingTypeSnapshot: item.pricingTypeSnapshot,
+      quantity: item.quantity,
+      baseUnitPrice: this.toMoney(item.baseUnitPrice),
+      unitPrice: this.toMoney(item.unitPrice),
+      lineTotal: this.toMoney(item.lineTotal),
+      lineDiscountAmount: this.toMoney(item.lineDiscountAmount),
+      lineSurchargeAmount: this.toMoney(item.lineSurchargeAmount),
+      usedMinutes: Math.max(0, Math.trunc(Number(item.usedMinutes) || 0)),
+      startAt: item.startAt || null,
+      stopAt: item.stopAt || null,
+      note: item.note || '',
+    };
+  }
+
   private async replaceItems(executor: OrdersExecutor, orderId: string, items: NormalizedItem[]) {
     await executor.query('DELETE FROM order_items WHERE "orderId" = $1', [orderId]);
     for (const [index, item] of items.entries()) {
       await executor.query(
-        `INSERT INTO order_items (id, "orderId", "productId", quantity, "baseUnitPrice", "unitPrice", "totalPrice", "pricingTypeSnapshot", "timeRateAmountSnapshot", "timeRateMinutesSnapshot", "usedMinutes", "startAt", "stopAt", "displayOrder", note, "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz, $14, $15, NOW(), NOW())`,
+        `INSERT INTO order_items (id, "orderId", "productId", quantity, "baseUnitPrice", "unitPrice", "lineDiscountAmount", "lineSurchargeAmount", "totalPrice", "pricingTypeSnapshot", "timeRateAmountSnapshot", "timeRateMinutesSnapshot", "usedMinutes", "startAt", "stopAt", "displayOrder", note, "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15::timestamptz, $16, $17, NOW(), NOW())`,
         [
           item.lineId,
           orderId,
@@ -321,6 +388,8 @@ export class OrdersService {
           item.quantity,
           item.baseUnitPrice,
           item.unitPrice,
+          item.lineDiscountAmount,
+          item.lineSurchargeAmount,
           item.lineTotal,
           item.pricingTypeSnapshot,
           item.timeRateAmountSnapshot,
@@ -438,8 +507,8 @@ export class OrdersService {
       surchargeAmount: input.surchargeAmount,
       paidAmount: input.paidAmount,
       orderState: input.orderState,
-      hasOpenTimeItems: items.some((it) => it.stopAt == null),
-      applyOpenTimeStateRule: Boolean(input.applySaveStatusRules),
+      hasOpenTimeItems: items.some((it) => it.pricingTypeSnapshot === 'TIME' && it.stopAt == null),
+      applyOpenTimeStateRule: !isDraftCreate,
     });
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod, 'CASH');
     let code = '';
@@ -456,7 +525,32 @@ export class OrdersService {
         ],
       );
       await this.replaceItems(tx, orderId, items);
-      await this.logAction(tx, { orderId, action: 'CREATE_ORDER', detail: 'Tạo hóa đơn', userId: user.id, snapshot: { itemCount: items.length } });
+      await this.logAction(tx, {
+        orderId,
+        action: 'CREATE_ORDER',
+        detail: 'Tạo hóa đơn',
+        userId: user.id,
+        snapshot: {
+          order: {
+            entityType: normalizedInput.entityType,
+            tableId: normalizedInput.entityType === 'TABLE' ? normalizedInput.tableId || null : null,
+            roomId: normalizedInput.entityType === 'ROOM' ? normalizedInput.roomId || null : null,
+            customerName: input.customerName || '',
+            totalAmount: totals.subtotalAmount,
+            discountMode: totals.discountMode,
+            discountValue: totals.discountValue,
+            discountAmount: totals.discountAmount,
+            surchargeMode: totals.surchargeMode,
+            surchargeValue: totals.surchargeValue,
+            surchargeAmount: totals.surchargeAmount,
+            finalAmount: totals.finalAmount,
+            paidAmount: totals.paidAmount,
+            paymentMethod,
+            orderState: totals.orderState,
+          },
+          items: items.map((it) => this.mapItemForSnapshot(it)),
+        },
+      });
     });
     return { id: orderId, code, itemMappings: items.map((i) => ({ clientLineId: i.clientLineId, orderItemId: i.lineId })) };
   }
@@ -485,10 +579,10 @@ export class OrdersService {
 
     const itemRows = await this.db.query<{
       id: string; productId: string; productName: string; pricingTypeSnapshot: 'FIXED' | 'TIME'; quantity: number;
-      baseUnitPrice: string; unitPrice: string; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null; unit: string | null;
+      baseUnitPrice: string; unitPrice: string; totalPrice: string; lineDiscountAmount: string; lineSurchargeAmount: string; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null; unit: string | null;
     }>(
       `SELECT oi.id, oi."productId" AS "productId", p.name AS "productName", oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi.quantity,
-              oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes",
+              oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi."totalPrice"::text AS "totalPrice", oi."lineDiscountAmount"::text AS "lineDiscountAmount", oi."lineSurchargeAmount"::text AS "lineSurchargeAmount", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes",
               oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note, p.unit AS unit
        FROM order_items oi
        LEFT JOIN products p ON p.id = oi."productId"
@@ -530,6 +624,7 @@ export class OrdersService {
         unit: item.unit || undefined,
         baseUnitPrice: this.toMoney(item.baseUnitPrice),
         unitPrice: this.toMoney(item.unitPrice),
+        lineTotal: this.toMoney(item.totalPrice),
         quantity: Math.max(1, Math.trunc(Number(item.quantity) || 1)),
         timeRateAmountSnapshot: item.timeRateAmountSnapshot == null ? null : this.toMoney(item.timeRateAmountSnapshot),
         timeRateMinutesSnapshot: item.timeRateMinutesSnapshot,
@@ -538,16 +633,16 @@ export class OrdersService {
         activeSessionStartedAt: item.startAt,
         startAt: item.startAt,
         stopAt: item.stopAt,
-        lineDiscountAmount: 0,
-        lineSurchargeAmount: 0,
+        lineDiscountAmount: this.toMoney(item.lineDiscountAmount),
+        lineSurchargeAmount: this.toMoney(item.lineSurchargeAmount),
         note: item.note || '',
       })),
     };
   }
 
   async updateOrder(user: CurrentUser, id: string, input: UpdateOrderInput) {
-    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; discountMode: AdjustmentMode; discountValue: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>(
-      'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "discountMode", "discountValue"::text AS "discountValue", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
+    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>(
+      'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "totalAmount"::text AS "totalAmount", "finalAmount"::text AS "finalAmount", "discountAmount"::text AS "discountAmount", "discountMode", "discountValue"::text AS "discountValue", "surchargeAmount"::text AS "surchargeAmount", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
@@ -560,10 +655,10 @@ export class OrdersService {
 
     const currentItemsRows = await this.db.query<{
       id: string; productId: string; productName: string; unit: string | null; baseUnitPrice: string; unitPrice: string; quantity: number;
-      pricingTypeSnapshot: 'FIXED' | 'TIME'; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null;
+      pricingTypeSnapshot: 'FIXED' | 'TIME'; lineDiscountAmount: string; lineSurchargeAmount: string; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null;
     }>(
       `SELECT oi.id, oi."productId" AS "productId", p.name AS "productName", p.unit AS unit, oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi.quantity,
-              oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes", oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note
+              oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi."lineDiscountAmount"::text AS "lineDiscountAmount", oi."lineSurchargeAmount"::text AS "lineSurchargeAmount", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes", oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note
        FROM order_items oi LEFT JOIN products p ON p.id = oi."productId" WHERE oi."orderId" = $1`,
       [id],
     );
@@ -582,6 +677,8 @@ export class OrdersService {
       usedMinutes: Math.max(0, Math.trunc(Number(r.usedMinutes) || 0)),
       startAt: r.startAt,
       stopAt: r.stopAt,
+      lineDiscountAmount: this.toMoney(r.lineDiscountAmount),
+      lineSurchargeAmount: this.toMoney(r.lineSurchargeAmount),
     }));
 
     if (Array.isArray(input.billItems)) {
@@ -627,8 +724,8 @@ export class OrdersService {
       surchargeAmount: input.surchargeAmount ?? rows[0].surchargeValue,
       paidAmount: input.paidAmount ?? rows[0].paidAmount,
       orderState: effectiveOrderState,
-      hasOpenTimeItems: normalized.some((it) => it.stopAt == null),
-      applyOpenTimeStateRule: Boolean(input.applySaveStatusRules),
+      hasOpenTimeItems: normalized.some((it) => it.pricingTypeSnapshot === 'TIME' && it.stopAt == null),
+      applyOpenTimeStateRule: String(effectiveOrderState || rows[0].orderState || '').toUpperCase() !== 'DRAFT',
     });
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod ?? rows[0].paymentMethod, 'CASH');
     const normalizedTableId = typeof input.tableId === 'string' ? input.tableId.trim() : input.tableId;
@@ -657,6 +754,102 @@ export class OrdersService {
       }
     }
 
+    const previousOrderSnapshot = {
+      tableId: rows[0].tableId,
+      roomId: rows[0].roomId,
+      customerName: rows[0].customerName || '',
+      totalAmount: this.toMoney(rows[0].totalAmount),
+      discountMode: rows[0].discountMode,
+      discountValue: this.toRawAdjustmentValue(rows[0].discountValue),
+      discountAmount: this.toMoney(rows[0].discountAmount),
+      surchargeMode: rows[0].surchargeMode,
+      surchargeValue: this.toRawAdjustmentValue(rows[0].surchargeValue),
+      surchargeAmount: this.toMoney(rows[0].surchargeAmount),
+      finalAmount: this.toMoney(rows[0].finalAmount),
+      paidAmount: this.toMoney(rows[0].paidAmount),
+      paymentMethod: this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH'),
+      orderState: rows[0].orderState,
+    };
+    const nextOrderSnapshot = {
+      tableId: nextTableId,
+      roomId: nextRoomId,
+      customerName: input.customerName ?? rows[0].customerName ?? '',
+      discountMode: totals.discountMode,
+      discountValue: totals.discountValue,
+      discountAmount: totals.discountAmount,
+      surchargeMode: totals.surchargeMode,
+      surchargeValue: totals.surchargeValue,
+      surchargeAmount: totals.surchargeAmount,
+      totalAmount: totals.subtotalAmount,
+      finalAmount: totals.finalAmount,
+      paidAmount: totals.paidAmount,
+      paymentMethod,
+      orderState: totals.orderState,
+    };
+
+    const orderChanges: Record<string, { from: unknown; to: unknown }> = {};
+    const orderChangeKeys: Array<keyof typeof nextOrderSnapshot> = [
+      'tableId', 'roomId', 'customerName', 'discountMode', 'discountValue', 'discountAmount', 'surchargeMode', 'surchargeValue', 'surchargeAmount',
+      'totalAmount', 'finalAmount', 'paidAmount', 'paymentMethod', 'orderState',
+    ];
+    for (const key of orderChangeKeys) {
+      const prevValue = (previousOrderSnapshot as Record<string, unknown>)[key];
+      const nextValue = (nextOrderSnapshot as Record<string, unknown>)[key];
+      if (String(prevValue ?? '') !== String(nextValue ?? '')) {
+        orderChanges[key] = { from: prevValue ?? null, to: nextValue ?? null };
+      }
+    }
+
+    const previousItems = currentItemsRows.map((r) => this.mapItemForSnapshot({
+      lineId: r.id,
+      productId: r.productId,
+      productName: r.productName || '-',
+      pricingTypeSnapshot: r.pricingTypeSnapshot,
+      quantity: Math.max(1, Math.trunc(Number(r.quantity) || 1)),
+      baseUnitPrice: this.toMoney(r.baseUnitPrice),
+      unitPrice: this.toMoney(r.unitPrice),
+      lineTotal: r.pricingTypeSnapshot === 'TIME'
+        ? this.calculateTimePrice(this.toMoney(r.unitPrice), Math.max(1, Math.trunc(Number(r.timeRateMinutesSnapshot) || 1)), Math.max(0, Math.trunc(Number(r.usedMinutes) || 0)))
+        : Math.max(0, Math.trunc(Number(r.quantity) || 0)) * this.toMoney(r.unitPrice),
+      lineDiscountAmount: this.toMoney(r.lineDiscountAmount),
+      lineSurchargeAmount: this.toMoney(r.lineSurchargeAmount),
+      usedMinutes: Math.max(0, Math.trunc(Number(r.usedMinutes) || 0)),
+      startAt: r.startAt || null,
+      stopAt: r.stopAt || null,
+      note: r.note || '',
+    }));
+    const nextItems = normalized.map((it) => this.mapItemForSnapshot(it));
+    const previousById = new Map(previousItems.map((it) => [it.lineId, it]));
+    const nextById = new Map(nextItems.map((it) => [it.lineId, it]));
+    const addedItems = nextItems.filter((it) => !previousById.has(it.lineId));
+    const removedItems = previousItems.filter((it) => !nextById.has(it.lineId));
+    const updatedItems = nextItems
+      .filter((it) => previousById.has(it.lineId))
+      .map((it) => {
+        const prev = previousById.get(it.lineId)!;
+        const fields: Record<string, { from: unknown; to: unknown }> = {};
+        const keys: Array<keyof ItemLogSnapshot> = [
+          'productId', 'productName', 'pricingTypeSnapshot', 'quantity', 'baseUnitPrice', 'unitPrice', 'lineTotal',
+          'lineDiscountAmount', 'lineSurchargeAmount', 'usedMinutes', 'startAt', 'stopAt', 'note',
+        ];
+        for (const key of keys) {
+          if (String(prev[key] ?? '') !== String(it[key] ?? '')) {
+            fields[key] = { from: prev[key] ?? null, to: it[key] ?? null };
+          }
+        }
+        return { lineId: it.lineId, productName: it.productName, fields };
+      })
+      .filter((it) => Object.keys(it.fields).length > 0);
+
+    const changesSnapshot = {
+      order: orderChanges,
+      items: {
+        added: addedItems,
+        removed: removedItems,
+        updated: updatedItems,
+      },
+    };
+
     await this.db.withTransaction(async (tx) => {
       await tx.query(
         `UPDATE orders SET "tableId" = $2, "roomId" = $3, "customerName" = $4, "discountMode" = $5::"OrderAdjustmentMode", "discountValue" = $6,
@@ -682,7 +875,7 @@ export class OrdersService {
         ],
       );
       await this.replaceItems(tx, id, normalized);
-      await this.logAction(tx, { orderId: id, action: 'UPDATE_ORDER', detail: 'Cập nhật hóa đơn', userId: user.id, snapshot: { itemCount: normalized.length } });
+      await this.logAction(tx, { orderId: id, action: 'UPDATE_ORDER', detail: 'Cập nhật hóa đơn', userId: user.id, snapshot: changesSnapshot });
     });
     return { success: true };
   }

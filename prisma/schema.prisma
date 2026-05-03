@@ -229,6 +229,8 @@ model OrderItem {
   pricingTypeSnapshot PricingTypeSnapshot @default(FIXED)
   baseUnitPrice Decimal? @db.Decimal(14, 2)
   unitPrice  Decimal  @db.Decimal(12, 2)
+  lineDiscountAmount Decimal @default(0) @db.Decimal(12, 2)
+  lineSurchargeAmount Decimal @default(0) @db.Decimal(12, 2)
   totalPrice Decimal  @db.Decimal(12, 2)
   timeRateAmountSnapshot Decimal? @db.Decimal(14, 2)
   timeRateMinutesSnapshot Int?

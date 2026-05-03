@@ -1,0 +1,3 @@
+ALTER TABLE "order_items"
+ADD COLUMN "lineDiscountAmount" DECIMAL(12,2) NOT NULL DEFAULT 0,
+ADD COLUMN "lineSurchargeAmount" DECIMAL(12,2) NOT NULL DEFAULT 0;

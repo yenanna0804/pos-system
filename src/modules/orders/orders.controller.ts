@@ -34,6 +34,8 @@ type CreateOrderDto = {
     usedMinutes?: number;
     startAt?: string | null;
     stopAt?: string | null;
+    lineDiscountAmount?: number;
+    lineSurchargeAmount?: number;
   }[];
   branchId?: string;
   applySaveStatusRules?: boolean;
@@ -69,6 +71,8 @@ type UpdateOrderDto = {
     usedMinutes?: number;
     startAt?: string | null;
     stopAt?: string | null;
+    lineDiscountAmount?: number;
+    lineSurchargeAmount?: number;
   }[];
   billItemsPatch?: {
     addedItems?: {
@@ -86,6 +90,8 @@ type UpdateOrderDto = {
       usedMinutes?: number;
       startAt?: string | null;
       stopAt?: string | null;
+      lineDiscountAmount?: number;
+      lineSurchargeAmount?: number;
     }[];
     updatedItems?: {
       lineId: string;
@@ -102,6 +108,8 @@ type UpdateOrderDto = {
       usedMinutes?: number;
       startAt?: string | null;
       stopAt?: string | null;
+      lineDiscountAmount?: number;
+      lineSurchargeAmount?: number;
     }[];
     removedItemIds?: string[];
   };
