@@ -36,6 +36,7 @@ type CreateOrderDto = {
     stopAt?: string | null;
   }[];
   branchId?: string;
+  applySaveStatusRules?: boolean;
 };
 
 type UpdateOrderDto = {
@@ -104,6 +105,7 @@ type UpdateOrderDto = {
     }[];
     removedItemIds?: string[];
   };
+  applySaveStatusRules?: boolean;
 };
 
 @Controller()

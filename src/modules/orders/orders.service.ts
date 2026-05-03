@@ -38,6 +38,7 @@ type CreateOrderInput = {
     stopAt?: string | null;
   }[];
   branchId?: string;
+  applySaveStatusRules?: boolean;
 };
 
 type UpdateOrderInput = Partial<CreateOrderInput> & {
@@ -281,6 +282,8 @@ export class OrdersService {
     surchargeAmount?: unknown;
     paidAmount?: unknown;
     orderState?: unknown;
+    hasOpenTimeItems?: boolean;
+    applyOpenTimeStateRule?: boolean;
   }) {
     const discountMode = this.normalizeAdjustmentMode(input.discountMode, 'amount');
     const surchargeMode = this.normalizeAdjustmentMode(input.surchargeMode, 'amount');
@@ -297,9 +300,11 @@ export class OrdersService {
     const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
     const paidAmount = Math.min(this.toMoney(input.paidAmount), finalAmount);
     const forcedOrderState = String(input.orderState || '').toUpperCase();
+    const hasOpenTimeItems = Boolean(input.hasOpenTimeItems);
+    const applyOpenTimeStateRule = Boolean(input.applyOpenTimeStateRule);
     const orderState = forcedOrderState === 'DRAFT'
       ? 'DRAFT'
-      : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL');
+      : (applyOpenTimeStateRule && hasOpenTimeItems ? 'PARTIAL' : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL'));
     return { subtotalAmount, discountMode, discountValue, discountAmount, surchargeMode, surchargeValue, surchargeAmount, finalAmount, paidAmount, orderState };
   }
 
@@ -433,6 +438,8 @@ export class OrdersService {
       surchargeAmount: input.surchargeAmount,
       paidAmount: input.paidAmount,
       orderState: input.orderState,
+      hasOpenTimeItems: items.some((it) => it.stopAt == null),
+      applyOpenTimeStateRule: Boolean(input.applySaveStatusRules),
     });
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod, 'CASH');
     let code = '';
@@ -546,6 +553,10 @@ export class OrdersService {
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
     if (rows[0].orderState === 'DELETED') throw new BadRequestException('Không thể cập nhật hóa đơn đã xóa');
+    const requestedOrderState = String(input.orderState || '').toUpperCase();
+    const effectiveOrderState = requestedOrderState === 'DRAFT' && rows[0].orderState !== 'DRAFT'
+      ? undefined
+      : input.orderState;
 
     const currentItemsRows = await this.db.query<{
       id: string; productId: string; productName: string; unit: string | null; baseUnitPrice: string; unitPrice: string; quantity: number;
@@ -615,9 +626,37 @@ export class OrdersService {
       surchargeValue: input.surchargeValue,
       surchargeAmount: input.surchargeAmount ?? rows[0].surchargeValue,
       paidAmount: input.paidAmount ?? rows[0].paidAmount,
-      orderState: input.orderState,
+      orderState: effectiveOrderState,
+      hasOpenTimeItems: normalized.some((it) => it.stopAt == null),
+      applyOpenTimeStateRule: Boolean(input.applySaveStatusRules),
     });
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod ?? rows[0].paymentMethod, 'CASH');
+    const normalizedTableId = typeof input.tableId === 'string' ? input.tableId.trim() : input.tableId;
+    const normalizedRoomId = typeof input.roomId === 'string' ? input.roomId.trim() : input.roomId;
+
+    let nextTableId = rows[0].tableId;
+    let nextRoomId = rows[0].roomId;
+
+    if (input.entityType === 'TABLE') {
+      if (normalizedTableId) {
+        nextTableId = normalizedTableId;
+        nextRoomId = null;
+      } else {
+        if (!rows[0].branchId) throw new BadRequestException('Hóa đơn chưa có chi nhánh để gán bàn mang về');
+        nextTableId = await this.resolveTakeawayTableId(rows[0].branchId);
+        nextRoomId = null;
+      }
+    } else if (input.entityType === 'ROOM') {
+      if (normalizedRoomId) {
+        nextTableId = null;
+        nextRoomId = normalizedRoomId;
+      } else {
+        if (!rows[0].branchId) throw new BadRequestException('Hóa đơn chưa có chi nhánh để gán bàn mang về');
+        nextTableId = await this.resolveTakeawayTableId(rows[0].branchId);
+        nextRoomId = null;
+      }
+    }
+
     await this.db.withTransaction(async (tx) => {
       await tx.query(
         `UPDATE orders SET "tableId" = $2, "roomId" = $3, "customerName" = $4, "discountMode" = $5::"OrderAdjustmentMode", "discountValue" = $6,
@@ -626,8 +665,8 @@ export class OrdersService {
          WHERE id = $1`,
         [
           id,
-          input.entityType === 'TABLE' ? input.tableId ?? rows[0].tableId : null,
-          input.entityType === 'ROOM' ? input.roomId ?? rows[0].roomId : null,
+          nextTableId,
+          nextRoomId,
           input.customerName ?? rows[0].customerName,
           totals.discountMode,
           totals.discountValue,
