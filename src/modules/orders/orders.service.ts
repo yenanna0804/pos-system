@@ -884,6 +884,17 @@ export class OrdersService {
     const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+
+    const itemCountRows = await this.db.query<{ itemCount: string }>(
+      'SELECT COUNT(*)::text AS "itemCount" FROM order_items WHERE "orderId" = $1',
+      [id],
+    );
+    const itemCount = Math.max(0, Math.trunc(Number(itemCountRows[0]?.itemCount || 0)));
+    if (itemCount === 0) {
+      await this.db.query('DELETE FROM orders WHERE id = $1', [id]);
+      return { success: true };
+    }
+
     if (rows[0].orderState === 'DELETED') return { success: true };
     await this.db.withTransaction(async (tx) => {
       await tx.query('DELETE FROM order_items WHERE "orderId" = $1', [id]);
