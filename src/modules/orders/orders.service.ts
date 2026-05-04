@@ -434,6 +434,13 @@ export class OrdersService {
     const pageSize = Math.max(1, Math.min(100, Math.trunc(Number(params.pageSize) || 10)));
     const where: string[] = ['od."branchId" = $1'];
     const sqlParams: unknown[] = [branchId];
+    const buildExclusiveEnd = (value: string) => {
+      const end = new Date(String(value).trim());
+      if (Number.isNaN(end.getTime())) throw new BadRequestException('Thời gian kết thúc không hợp lệ');
+      end.setSeconds(0, 0);
+      end.setMinutes(end.getMinutes() + 1);
+      return end.toISOString();
+    };
     if (params.search?.trim()) {
       sqlParams.push(`%${params.search.trim()}%`);
       where.push(`(od."orderCode" ILIKE $${sqlParams.length} OR COALESCE(od."customerName", '') ILIKE $${sqlParams.length})`);
@@ -466,8 +473,8 @@ export class OrdersService {
       where.push(`od."createdAt" >= $${sqlParams.length}::timestamptz`);
     }
     if (params.endDate) {
-      sqlParams.push(params.endDate);
-      where.push(`od."createdAt" <= $${sqlParams.length}::timestamptz`);
+      sqlParams.push(buildExclusiveEnd(params.endDate));
+      where.push(`od."createdAt" < $${sqlParams.length}::timestamptz`);
     }
     const whereSql = where.join(' AND ');
     const totalRows = await this.db.query<{ total: string }>(`SELECT COUNT(*)::text AS total FROM orders od WHERE ${whereSql}`, sqlParams);
