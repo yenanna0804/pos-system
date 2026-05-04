@@ -392,31 +392,27 @@ export class OrdersService {
 
   private async replaceItems(executor: OrdersExecutor, orderId: string, items: NormalizedItem[]) {
     await executor.query('DELETE FROM order_items WHERE "orderId" = $1', [orderId]);
+    if (items.length === 0) return;
+
+    const params: unknown[] = [];
+    const valueClauses: string[] = [];
     for (const [index, item] of items.entries()) {
-      await executor.query(
-        `INSERT INTO order_items (id, "orderId", "productId", quantity, "baseUnitPrice", "unitPrice", "lineDiscountAmount", "lineSurchargeAmount", "totalPrice", "pricingTypeSnapshot", "timeRateAmountSnapshot", "timeRateMinutesSnapshot", "usedMinutes", "startAt", "stopAt", "displayOrder", note, "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15::timestamptz, $16, $17, NOW(), NOW())`,
-        [
-          item.lineId,
-          orderId,
-          item.productId,
-          item.quantity,
-          item.baseUnitPrice,
-          item.unitPrice,
-          item.lineDiscountAmount,
-          item.lineSurchargeAmount,
-          item.lineTotal,
-          item.pricingTypeSnapshot,
-          item.timeRateAmountSnapshot,
-          item.timeRateMinutesSnapshot,
-          item.usedMinutes,
-          item.startAt,
-          item.stopAt,
-          index + 1,
-          item.note || null,
-        ],
+      const b = params.length;
+      params.push(
+        item.lineId, orderId, item.productId, item.quantity,
+        item.baseUnitPrice, item.unitPrice, item.lineDiscountAmount, item.lineSurchargeAmount,
+        item.lineTotal, item.pricingTypeSnapshot, item.timeRateAmountSnapshot, item.timeRateMinutesSnapshot,
+        item.usedMinutes, item.startAt, item.stopAt, index + 1, item.note || null,
+      );
+      valueClauses.push(
+        `($${b+1}, $${b+2}, $${b+3}, $${b+4}, $${b+5}, $${b+6}, $${b+7}, $${b+8}, $${b+9}, $${b+10}, $${b+11}, $${b+12}, $${b+13}, $${b+14}::timestamptz, $${b+15}::timestamptz, $${b+16}, $${b+17}, NOW(), NOW())`,
       );
     }
+    await executor.query(
+      `INSERT INTO order_items (id, "orderId", "productId", quantity, "baseUnitPrice", "unitPrice", "lineDiscountAmount", "lineSurchargeAmount", "totalPrice", "pricingTypeSnapshot", "timeRateAmountSnapshot", "timeRateMinutesSnapshot", "usedMinutes", "startAt", "stopAt", "displayOrder", note, "createdAt", "updatedAt")
+       VALUES ${valueClauses.join(', ')}`,
+      params,
+    );
   }
 
   async listOrders(user: CurrentUser, params: {
@@ -449,6 +445,13 @@ export class OrdersService {
     if (params.paymentMethod) {
       sqlParams.push(params.paymentMethod);
       where.push(`od."paymentMethod"::text = $${sqlParams.length}`);
+    }
+    if (params.areaId) {
+      sqlParams.push(params.areaId);
+      where.push(`(
+        od."tableId" IN (SELECT id FROM tables WHERE "areaId" = $${sqlParams.length} AND "deletedAt" IS NULL)
+        OR od."roomId" IN (SELECT id FROM rooms WHERE "areaId" = $${sqlParams.length} AND "deletedAt" IS NULL)
+      )`);
     }
     if (params.roomId) {
       sqlParams.push(params.roomId);
@@ -496,10 +499,10 @@ export class OrdersService {
   async createOrder(user: CurrentUser, input: CreateOrderInput) {
     if (input.entityType && input.entityType !== 'TABLE' && input.entityType !== 'ROOM') throw new BadRequestException('Loại đối tượng hóa đơn không hợp lệ');
     const orderId = randomUUID();
-    const selectedBranchId = await this.resolveResourceBranch(user, input);
+    const branchId = await this.resolveResourceBranch(user, input);
     let normalizedInput: CreateOrderInput = input;
     if (!input.entityType || (input.entityType === 'TABLE' && !input.tableId) || (input.entityType === 'ROOM' && !input.roomId)) {
-      const takeawayTableId = await this.resolveTakeawayTableId(selectedBranchId);
+      const takeawayTableId = await this.resolveTakeawayTableId(branchId);
       normalizedInput = {
         ...input,
         entityType: 'TABLE',
@@ -507,8 +510,6 @@ export class OrdersService {
         roomId: undefined,
       };
     }
-
-    const branchId = await this.resolveResourceBranch(user, normalizedInput);
     const items = await this.normalizeItems(orderId, input.billItems);
     const isDraftCreate = String(input.orderState || '').toUpperCase() === 'DRAFT';
     if (items.length === 0 && !isDraftCreate) throw new BadRequestException('Hóa đơn phải có ít nhất một món');
@@ -723,7 +724,10 @@ export class OrdersService {
           lineId: patch.lineId,
         });
       }
-      for (const add of input.billItemsPatch.addedItems || []) byId.set(String(add.lineId || randomUUID()), { ...add, lineId: String(add.lineId || randomUUID()) });
+      for (const add of input.billItemsPatch.addedItems || []) {
+        const newLineId = String(add.lineId || randomUUID());
+        byId.set(newLineId, { ...add, lineId: newLineId });
+      }
       nextBillItems = Array.from(byId.values());
     }
 
