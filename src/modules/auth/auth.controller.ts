@@ -11,6 +11,12 @@ class LoginContextDto {
   username: string;
 }
 
+class ChangePasswordDto {
+  currentPassword: string;
+  newPassword: string;
+  confirmNewPassword: string;
+}
+
 @Controller('auth')
 export class AuthController {
   constructor(private authService: AuthService) {}
@@ -23,6 +29,15 @@ export class AuthController {
   @Post('login-context')
   async loginContext(@Body() dto: LoginContextDto) {
     return this.authService.getLoginContext(dto.username);
+  }
+
+  @Post('change-password')
+  async changePassword(@Headers('authorization') auth: string, @Body() dto: ChangePasswordDto) {
+    const token = auth?.replace('Bearer ', '').trim();
+    if (!token) {
+      throw new BadRequestException('Token required');
+    }
+    return this.authService.changePassword(token, dto.currentPassword, dto.newPassword, dto.confirmNewPassword);
   }
 
   @Get('me')

@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PgService } from '../../database/pg.service';
 import * as bcrypt from 'bcryptjs';
 
@@ -127,5 +127,40 @@ export class AuthService {
       branchId: user.branchId,
       branchName: user.branchName,
     };
+  }
+
+  async changePassword(token: string, currentPassword: string, newPassword: string, confirmNewPassword: string) {
+    const currentUser = await this.validateToken(token);
+
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
+      throw new BadRequestException('Vui lòng nhập đầy đủ thông tin mật khẩu');
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      throw new BadRequestException('Xác nhận mật khẩu mới không khớp');
+    }
+
+    const users = await this.db.query<UserRow>(
+      `SELECT u.id, u.username, u.password, u."fullName", u.role, u."branchId", u."isActive", b.name AS "branchName"
+       FROM users u
+       LEFT JOIN branches b ON b.id = u."branchId"
+       WHERE u.id = $1
+       LIMIT 1`,
+      [currentUser.id],
+    );
+    const user = users[0];
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Tài khoản không hợp lệ');
+    }
+
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+    if (!isCurrentPasswordValid) {
+      throw new BadRequestException('Mật khẩu hiện tại không đúng');
+    }
+
+    const nextHashedPassword = await bcrypt.hash(newPassword, 10);
+    await this.db.query('UPDATE users SET password = $2, "updatedAt" = NOW() WHERE id = $1', [user.id, nextHashedPassword]);
+    return { success: true };
   }
 }
