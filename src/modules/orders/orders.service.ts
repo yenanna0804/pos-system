@@ -159,10 +159,10 @@ export class OrdersService {
   }
 
   private async generateOrderCode(executor: OrdersExecutor) {
-    const now = new Date();
-    const yy = String(now.getFullYear()).slice(-2);
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
+    const now = new Date(Date.now() + 7 * 3_600_000);
+    const yy = String(now.getUTCFullYear()).slice(-2);
+    const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(now.getUTCDate()).padStart(2, '0');
     const prefix = `HD${yy}${mm}${dd}`;
     const seq = await executor.query<{ nextSeq: string }>(`SELECT nextval('public.orders_order_code_seq')::text AS "nextSeq"`);
     return `${prefix}${Number(seq[0]?.nextSeq || 1)}`;
@@ -487,7 +487,7 @@ export class OrdersService {
       `SELECT od.id, od."orderCode" AS code, COALESCE(t.name, r.name, '-') AS "tableName", od."customerName" AS "customerName",
               COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "creatorName",
               od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount",
-              od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt"::text AS "createdAt"
+              od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt" AS "createdAt"
        FROM orders od
        LEFT JOIN users u ON u.id = od."userId"
        LEFT JOIN tables t ON t.id = od."tableId"
@@ -591,7 +591,7 @@ export class OrdersService {
               od."customerName" AS "customerName", od."discountAmount"::text AS "discountAmount", od."discountMode"::text AS "discountMode", od."discountValue"::text AS "discountValue",
               od."surchargeAmount"::text AS "surchargeAmount", od."surchargeMode"::text AS "surchargeMode", od."surchargeValue"::text AS "surchargeValue",
               od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."paymentMethod"::text AS "paymentMethod",
-              od."orderState" AS "orderState", od."branchId" AS "branchId", od."createdAt"::text AS "createdAt", od."updatedAt"::text AS "updatedAt"
+              od."orderState" AS "orderState", od."branchId" AS "branchId", od."createdAt" AS "createdAt", od."updatedAt" AS "updatedAt"
        FROM orders od
        LEFT JOIN tables t ON t.id = od."tableId"
        LEFT JOIN rooms r ON r.id = od."roomId"
@@ -943,7 +943,7 @@ export class OrdersService {
     return this.db.query<{
       id: string; action: string; detail: string | null; snapshot: unknown; createdBy: string | null; createdByName: string | null; createdAt: string;
     }>(
-      `SELECT l.id, l.action, l.detail, l.snapshot, l."createdBy" AS "createdBy", COALESCE(NULLIF(u."fullName", ''), u.username, l."createdBy") AS "createdByName", l."createdAt"::text AS "createdAt"
+      `SELECT l.id, l.action, l.detail, l.snapshot, l."createdBy" AS "createdBy", COALESCE(NULLIF(u."fullName", ''), u.username, l."createdBy") AS "createdByName", l."createdAt" AS "createdAt"
        FROM order_logs l LEFT JOIN users u ON u.id = l."createdBy" WHERE l."orderId" = $1 ORDER BY l."createdAt" DESC`,
       [id],
     );

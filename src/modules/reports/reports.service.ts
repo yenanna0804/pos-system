@@ -113,7 +113,7 @@ export class ReportsService {
       `SELECT
          od.id,
          od."orderCode" AS code,
-         od."createdAt"::text AS "createdAt",
+         od."createdAt" AS "createdAt",
          COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "receiverName",
          od."paymentMethod"::text AS "paymentMethod",
          od."paidAmount"::text AS "paidAmount",
@@ -310,7 +310,7 @@ export class ReportsService {
          json_agg(json_build_object(
            'orderId', od.id,
            'orderCode', od."orderCode",
-           'createdAt', od."createdAt"::text,
+           'createdAt', od."createdAt",
            'quantity', oi.quantity,
            'unitPrice', oi."unitPrice"::text,
            'lineTotal', oi."totalPrice"::text
