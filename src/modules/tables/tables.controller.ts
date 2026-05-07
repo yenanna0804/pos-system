@@ -1,9 +1,8 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { TablesService } from './tables.service';
-import { AuthGuard } from '../../common/auth.guard';
 import { CurrentUser } from '../../common/current-user.decorator';
-import { UseGuards } from '@nestjs/common';
 import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
+import { RequiresPermission, Permission } from '../../common/permissions';
 
 type AreaDto = {
   name: string;
@@ -25,7 +24,6 @@ type DiningTableDto = {
 };
 
 @Controller()
-@UseGuards(AuthGuard)
 export class TablesController {
   constructor(private readonly tablesService: TablesService) {}
 
@@ -35,21 +33,25 @@ export class TablesController {
   }
 
   @Post('areas')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   createArea(@CurrentUser() user: CurrentUserType, @Body() dto: AreaDto) {
     return this.tablesService.createArea(user, dto);
   }
 
   @Patch('areas/:id')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   updateArea(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto: AreaDto) {
     return this.tablesService.updateArea(user, id, dto);
   }
 
   @Delete('areas/:id')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   deleteArea(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.deleteArea(user, id);
   }
 
   @Get('areas/:id/delete-impact')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   getAreaDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.getAreaDeleteImpact(user, id);
   }
@@ -60,21 +62,25 @@ export class TablesController {
   }
 
   @Post('rooms')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   createRoom(@CurrentUser() user: CurrentUserType, @Body() dto: RoomDto) {
     return this.tablesService.createRoom(user, dto);
   }
 
   @Patch('rooms/:id')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   updateRoom(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto: RoomDto) {
     return this.tablesService.updateRoom(user, id, dto);
   }
 
   @Delete('rooms/:id')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   deleteRoom(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.deleteRoom(user, id);
   }
 
   @Get('rooms/:id/delete-impact')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   getRoomDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.getRoomDeleteImpact(user, id);
   }
@@ -105,21 +111,25 @@ export class TablesController {
   }
 
   @Get('dining-tables/:id/delete-impact')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   getDiningTableDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.getDiningTableDeleteImpact(user, id);
   }
 
   @Post('dining-tables')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   createDiningTable(@CurrentUser() user: CurrentUserType, @Body() dto: DiningTableDto) {
     return this.tablesService.createDiningTable(user, dto);
   }
 
   @Patch('dining-tables/:id')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   updateDiningTable(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto: DiningTableDto) {
     return this.tablesService.updateDiningTable(user, id, dto);
   }
 
   @Delete('dining-tables/:id')
+  @RequiresPermission(Permission.TABLES_ACCESS)
   deleteDiningTable(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.tablesService.deleteDiningTable(user, id);
   }

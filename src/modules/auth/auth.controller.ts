@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Headers, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { Public } from '../../common/auth.guard';
 
 class LoginDto {
   username: string;
@@ -17,6 +18,7 @@ class ChangePasswordDto {
   confirmNewPassword: string;
 }
 
+@Public()
 @Controller('auth')
 export class AuthController {
   constructor(private authService: AuthService) {}

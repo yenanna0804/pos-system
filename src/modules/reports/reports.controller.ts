@@ -1,11 +1,11 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import { AuthGuard } from '../../common/auth.guard';
+import { Controller, Get, Query } from '@nestjs/common';
 import { CurrentUser } from '../../common/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
 import { ReportsService } from './reports.service';
+import { RequiresPermission, Permission } from '../../common/permissions';
 
 @Controller('reports')
-@UseGuards(AuthGuard)
+@RequiresPermission(Permission.REPORTS_ACCESS)
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 

@@ -1,8 +1,8 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
-import { AuthGuard } from '../../common/auth.guard';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { CurrentUser } from '../../common/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
 import { OrdersService } from './orders.service';
+import { RequiresPermission, Permission } from '../../common/permissions';
 
 type CreateOrderDto = {
   entityType?: 'TABLE' | 'ROOM';
@@ -117,7 +117,6 @@ type UpdateOrderDto = {
 };
 
 @Controller()
-@UseGuards(AuthGuard)
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
@@ -180,11 +179,13 @@ export class OrdersController {
   }
 
   @Delete('orders/:id')
+  @RequiresPermission(Permission.ORDERS_DELETE)
   deleteOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.ordersService.markDeleted(user, id);
   }
 
   @Delete('orders/:id/hard')
+  @RequiresPermission(Permission.ORDERS_DELETE)
   hardDeleteOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.ordersService.hardDelete(user, id);
   }

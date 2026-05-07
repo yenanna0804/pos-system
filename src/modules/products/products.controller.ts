@@ -4,7 +4,6 @@ import {
   Controller,
   Delete,
   Get,
-  UseGuards,
   Query,
   Param,
   Patch,
@@ -14,9 +13,9 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ProductsService } from './products.service';
-import { AuthGuard } from '../../common/auth.guard';
 import { CurrentUser } from '../../common/current-user.decorator';
 import type { CurrentUser as CurrentUserType } from '../../common/auth.types';
+import { RequiresPermission, Permission } from '../../common/permissions';
 
 type CreateProductDto = {
   type?: 'SINGLE' | 'COMBO' | 'TIME';
@@ -46,7 +45,6 @@ type UpdateCategoryDto = {
 };
 
 @Controller()
-@UseGuards(AuthGuard)
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
@@ -78,26 +76,31 @@ export class ProductsController {
   }
 
   @Get('products/:id/delete-impact')
+  @RequiresPermission(Permission.PRODUCTS_DELETE)
   getProductDeleteImpact(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.productsService.getProductDeleteImpact(id, user);
   }
 
   @Post('products')
+  @RequiresPermission(Permission.PRODUCTS_CREATE)
   createProduct(@CurrentUser() user: CurrentUserType, @Body() dto: CreateProductDto) {
     return this.productsService.createProduct(dto, user);
   }
 
   @Patch('products/:id')
+  @RequiresPermission(Permission.PRODUCTS_UPDATE)
   updateProduct(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto: CreateProductDto) {
     return this.productsService.updateProduct(id, dto, user);
   }
 
   @Delete('products/:id')
+  @RequiresPermission(Permission.PRODUCTS_DELETE)
   deleteProduct(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
     return this.productsService.deleteProduct(id, user);
   }
 
   @Post('products/upload-image')
+  @RequiresPermission(Permission.PRODUCTS_CREATE)
   @UseInterceptors(
     FileInterceptor('image', {
       limits: { fileSize: 5 * 1024 * 1024 },
@@ -116,16 +119,19 @@ export class ProductsController {
   }
 
   @Post('categories')
+  @RequiresPermission(Permission.CATEGORIES_MANAGE)
   createCategory(@Body() dto: CreateCategoryDto) {
     return this.productsService.createCategory(dto.name);
   }
 
   @Patch('categories/:id')
+  @RequiresPermission(Permission.CATEGORIES_MANAGE)
   updateCategory(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     return this.productsService.updateCategory(id, dto);
   }
 
   @Delete('categories/:id')
+  @RequiresPermission(Permission.CATEGORIES_MANAGE)
   deleteCategory(@Param('id') id: string) {
     return this.productsService.deleteCategory(id);
   }

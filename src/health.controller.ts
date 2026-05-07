@@ -1,6 +1,8 @@
 import { Controller, Get } from '@nestjs/common';
 import { PgService } from './database/pg.service';
+import { Public } from './common/auth.guard';
 
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(private readonly db: PgService) {}
