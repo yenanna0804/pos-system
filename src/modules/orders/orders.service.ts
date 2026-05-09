@@ -914,7 +914,10 @@ export class OrdersService {
         ],
       );
       await this.replaceItems(tx, id, normalized);
-      await this.logAction(tx, { orderId: id, action: 'UPDATE_ORDER', detail: 'Cập nhật hóa đơn', userId: user.id, snapshot: changesSnapshot });
+      const hasChanges = Object.keys(orderChanges).length > 0 || addedItems.length > 0 || removedItems.length > 0 || updatedItems.length > 0;
+      if (hasChanges) {
+        await this.logAction(tx, { orderId: id, action: 'UPDATE_ORDER', detail: 'Cập nhật hóa đơn', userId: user.id, snapshot: changesSnapshot });
+      }
     });
     return { success: true };
   }
