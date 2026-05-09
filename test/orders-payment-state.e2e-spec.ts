@@ -62,7 +62,7 @@ describe('Order payment state integration', () => {
     if (app) await app.close();
   });
 
-  it('creates order and keeps PARTIAL when paidAmount is 0', async () => {
+  it('creates order and keeps UNPAID when paidAmount is 0', async () => {
     const loginRes = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ username, password: '123456', branchId: '' })
@@ -107,7 +107,7 @@ describe('Order payment state integration', () => {
       .set('Authorization', `Bearer ${token}`)
       .expect(200);
 
-    expect(detailRes.body?.orderState).toBe('PARTIAL');
+    expect(detailRes.body?.orderState).toBe('UNPAID');
     expect(Number(detailRes.body?.paidAmount || 0)).toBe(0);
     expect(detailRes.body?.paymentMethod).toBe('CASH');
   });

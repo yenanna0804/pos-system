@@ -66,7 +66,7 @@ export class ReportsService {
     }
 
     const range = this.buildRange(query.startDate, query.endDate);
-    const allowedStates = ['PAID', 'PARTIAL'];
+    const allowedStates = ['PAID', 'PARTIAL', 'UNPAID'];
     const requestedStates = (query.orderStates || []).filter((state) => allowedStates.includes(state));
     const effectiveStates = requestedStates.length ? requestedStates : allowedStates;
 
@@ -244,7 +244,7 @@ export class ReportsService {
     if (!branchId) return { rows: [] };
 
     const range = this.buildRange(query.startDate, query.endDate);
-    const effectiveStates = ['PAID', 'PARTIAL'];
+    const effectiveStates = ['PAID', 'PARTIAL', 'UNPAID'];
 
     const where: string[] = [
       'od."branchId" = $1',

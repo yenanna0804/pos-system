@@ -20,7 +20,7 @@ type CreateOrderInput = {
   surchargeValue?: number;
   paidAmount?: number;
   paymentMethod?: 'CASH' | 'BANKING';
-  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL';
+  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID';
   billItems: {
     lineId: string;
     productId: string;
@@ -352,7 +352,9 @@ export class OrdersService {
     const applyOpenTimeStateRule = Boolean(input.applyOpenTimeStateRule);
     const orderState = forcedOrderState === 'DRAFT'
       ? 'DRAFT'
-      : (applyOpenTimeStateRule && hasOpenTimeItems ? 'PARTIAL' : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL'));
+      : (paidAmount === 0
+          ? (finalAmount === 0 ? 'PAID' : 'UNPAID')
+          : (applyOpenTimeStateRule && hasOpenTimeItems ? 'PARTIAL' : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL')));
     return { subtotalAmount, discountMode, discountValue, discountAmount, surchargeMode, surchargeValue, surchargeAmount, finalAmount, paidAmount, orderState };
   }
 
@@ -482,7 +484,7 @@ export class OrdersService {
     sqlParams.push(pageSize, (page - 1) * pageSize);
     const rows = await this.db.query<{
       id: string; code: string; tableName: string | null; customerName: string | null; creatorName: string | null;
-      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED'; createdAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code, COALESCE(t.name, r.name, '-') AS "tableName", od."customerName" AS "customerName",
               COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "creatorName",
@@ -585,7 +587,7 @@ export class OrdersService {
     const rows = await this.db.query<{
       id: string; code: string; tableId: string | null; roomId: string | null; tableName: string | null; roomName: string | null; areaName: string | null;
       customerName: string | null; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string;
-      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code, od."tableId" AS "tableId", od."roomId" AS "roomId", t.name AS "tableName", r.name AS "roomName", COALESCE(a.name, ar.name) AS "areaName",
               od."customerName" AS "customerName", od."discountAmount"::text AS "discountAmount", od."discountMode"::text AS "discountMode", od."discountValue"::text AS "discountValue",
@@ -667,7 +669,7 @@ export class OrdersService {
   }
 
   async updateOrder(user: CurrentUser, id: string, input: UpdateOrderInput) {
-    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>(
+    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>(
       'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "totalAmount"::text AS "totalAmount", "finalAmount"::text AS "finalAmount", "discountAmount"::text AS "discountAmount", "discountMode", "discountValue"::text AS "discountValue", "surchargeAmount"::text AS "surchargeAmount", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
@@ -906,7 +908,7 @@ export class OrdersService {
   }
 
   async markDeleted(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
+    const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
 

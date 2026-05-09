@@ -51,7 +51,7 @@ type UpdateCategoryInput = {
 type ProductDeleteImpactOrder = {
   orderId: string;
   orderCode: string;
-  orderState: 'DRAFT' | 'PARTIAL' | 'PAID' | 'DELETED';
+  orderState: 'DRAFT' | 'PARTIAL' | 'PAID' | 'UNPAID' | 'DELETED';
   createdAt: string;
   itemCount: number;
 };
@@ -189,8 +189,14 @@ export class ProductsService {
         `translate(lower(coalesce(c.name, '')), '${VIETNAMESE_DIACRITICS_FROM}', '${VIETNAMESE_DIACRITICS_TO}')`;
       const normalizedSearch =
         `translate(lower(${searchPattern}), '${VIETNAMESE_DIACRITICS_FROM}', '${VIETNAMESE_DIACRITICS_TO}')`;
+      const normalizedSku = `lower(coalesce(p.sku, ''))`;
+      const loweredSearch = `lower(${searchPattern})`;
 
-      whereParts.push(`(${normalizedProductName} LIKE ${normalizedSearch} OR ${normalizedCategoryName} LIKE ${normalizedSearch})`);
+      whereParts.push(`(
+        ${normalizedProductName} LIKE ${normalizedSearch}
+        OR ${normalizedCategoryName} LIKE ${normalizedSearch}
+        OR ${normalizedSku} LIKE ${loweredSearch}
+      )`);
       whereParams.push(`%${params.search.trim()}%`);
       whereIndex += 1;
     }
@@ -723,7 +729,7 @@ export class ProductsService {
     const result = await this.db.withTransaction(async (tx) => {
       const impactedOrders = await tx.query<{
         orderId: string;
-        orderState: 'DRAFT' | 'PARTIAL' | 'PAID' | 'DELETED';
+        orderState: 'DRAFT' | 'PARTIAL' | 'PAID' | 'UNPAID' | 'DELETED';
         paidAmount: string;
         discountMode: 'percent' | 'amount';
         discountValue: string;
@@ -780,7 +786,9 @@ export class ProductsService {
             : this.toMoney(surchargeValue);
         const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
         const paidAmount = Math.min(this.toMoney(order.paidAmount), finalAmount);
-        const nextOrderState = finalAmount > 0 && paidAmount >= finalAmount ? 'PAID' : 'PARTIAL';
+        const nextOrderState = paidAmount === 0
+          ? (finalAmount === 0 ? 'PAID' : 'UNPAID')
+          : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL');
 
         await tx.query(
           `UPDATE orders

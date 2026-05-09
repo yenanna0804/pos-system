@@ -18,7 +18,7 @@ type CreateOrderDto = {
   surchargeValue?: number;
   paidAmount?: number;
   paymentMethod?: 'CASH' | 'BANKING';
-  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL';
+  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID';
   billItems: {
     lineId: string;
     productId: string;
@@ -55,7 +55,7 @@ type UpdateOrderDto = {
   surchargeValue?: number;
   paidAmount?: number;
   paymentMethod?: 'CASH' | 'BANKING';
-  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL';
+  orderState?: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID';
   billItems?: {
     lineId: string;
     productId: string;

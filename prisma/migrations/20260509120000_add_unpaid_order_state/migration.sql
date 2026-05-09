@@ -1,0 +1,1 @@
+ALTER TYPE "OrderLifecycleState" ADD VALUE IF NOT EXISTS 'UNPAID';

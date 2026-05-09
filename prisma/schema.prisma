@@ -28,6 +28,7 @@ enum PaymentMethod {
 enum OrderLifecycleState {
   DRAFT
   PARTIAL
+  UNPAID
   PAID
   DELETED
 }
