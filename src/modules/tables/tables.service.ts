@@ -15,10 +15,7 @@ type DiningTableInput = {
 };
 
 const NAME_REGEX = /^[\p{L}\p{N}\s&()./_-]{1,100}$/u;
-const VIETNAMESE_DIACRITICS_FROM =
-  'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ';
-const VIETNAMESE_DIACRITICS_TO =
-  'aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiioooooooooooooooooouuuuuuuuuuuyyyyyd';
+import { VIETNAMESE_DIACRITICS_FROM, VIETNAMESE_DIACRITICS_TO } from '../../common/utils';
 
 @Injectable()
 export class TablesService {

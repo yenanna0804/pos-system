@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { PgService } from '../../database/pg.service';
 import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
+import { VIETNAMESE_DIACRITICS_FROM, VIETNAMESE_DIACRITICS_TO } from '../../common/utils';
 
 type CreateProductInput = {
   type?: 'SINGLE' | 'COMBO' | 'TIME';
@@ -39,10 +40,6 @@ type ComboItemInput = { itemProductId: string; quantity: number };
 const SKU_REGEX = /^[A-Za-z0-9_-]{3,50}$/;
 const UNIT_REGEX = /^[\p{L}\p{N}\s./-]{1,30}$/u;
 const CATEGORY_NAME_REGEX = /^[\p{L}\p{N}\s&()./-]{2,100}$/u;
-const VIETNAMESE_DIACRITICS_FROM =
-  'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ';
-const VIETNAMESE_DIACRITICS_TO =
-  'aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiioooooooooooooooooouuuuuuuuuuuyyyyyd';
 
 type UpdateCategoryInput = {
   name: string;
