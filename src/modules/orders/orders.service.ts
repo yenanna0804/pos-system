@@ -486,7 +486,9 @@ export class OrdersService {
       id: string; code: string; tableName: string | null; customerName: string | null; creatorName: string | null;
       totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string;
     }>(
-      `SELECT od.id, od."orderCode" AS code, COALESCE(t.name, r.name, '-') AS "tableName", od."customerName" AS "customerName",
+      `SELECT od.id, od."orderCode" AS code,
+              COALESCE(NULLIF(CONCAT_WS(' / ', COALESCE(a.name, ar.name), r.name, t.name), ''), '-') AS "tableName",
+              od."customerName" AS "customerName",
               COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "creatorName",
               od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount",
               od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt" AS "createdAt"
@@ -494,6 +496,8 @@ export class OrdersService {
        LEFT JOIN users u ON u.id = od."userId"
        LEFT JOIN tables t ON t.id = od."tableId"
        LEFT JOIN rooms r ON r.id = od."roomId"
+       LEFT JOIN areas a ON a.id = t."areaId"
+       LEFT JOIN areas ar ON ar.id = r."areaId"
        WHERE ${whereSql}
        ORDER BY CASE od."orderState"::text
          WHEN 'UNPAID' THEN 1
