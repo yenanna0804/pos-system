@@ -228,7 +228,24 @@ export class ProductsService {
                    )
                  ) FILTER (WHERE pb.id IS NOT NULL),
                  '[]'::json
-               ) AS "branchConfigs"
+               ) AS "branchConfigs",
+               COALESCE(
+                 (
+                   SELECT JSON_AGG(
+                     JSON_BUILD_OBJECT(
+                       'itemProductId', pci."itemProductId",
+                       'quantity', pci.quantity,
+                       'itemName', pi.name,
+                       'itemUnit', pi.unit
+                     )
+                     ORDER BY pi.name
+                   )
+                   FROM product_combo_items pci
+                   INNER JOIN products pi ON pi.id = pci."itemProductId"
+                   WHERE pci."comboProductId" = p.id
+                 ),
+                 '[]'::json
+               ) AS "comboItems"
         FROM products p
         LEFT JOIN categories c ON c.id = p."categoryId" AND c."deletedAt" IS NULL
         LEFT JOIN product_branches pb ON pb."productId" = p.id

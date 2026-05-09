@@ -637,10 +637,28 @@ export class OrdersService {
     const itemRows = await this.db.query<{
       id: string; productId: string; productName: string; pricingTypeSnapshot: 'FIXED' | 'TIME'; quantity: number;
       baseUnitPrice: string; unitPrice: string; totalPrice: string; lineDiscountAmount: string; lineSurchargeAmount: string; timeRateAmountSnapshot: string | null; timeRateMinutesSnapshot: number | null; usedMinutes: number; startAt: string | null; stopAt: string | null; note: string | null; unit: string | null;
+      comboItems: { itemProductId: string; quantity: number; itemName: string; itemUnit: string | null }[] | null;
     }>(
       `SELECT oi.id, oi."productId" AS "productId", p.name AS "productName", oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi.quantity,
               oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi."totalPrice"::text AS "totalPrice", oi."lineDiscountAmount"::text AS "lineDiscountAmount", oi."lineSurchargeAmount"::text AS "lineSurchargeAmount", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes",
-              oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note, p.unit AS unit
+              oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note, p.unit AS unit,
+              COALESCE(
+                (
+                  SELECT JSON_AGG(
+                    JSON_BUILD_OBJECT(
+                      'itemProductId', pci."itemProductId",
+                      'quantity', pci.quantity,
+                      'itemName', pi.name,
+                      'itemUnit', pi.unit
+                    )
+                    ORDER BY pi.name
+                  )
+                  FROM product_combo_items pci
+                  INNER JOIN products pi ON pi.id = pci."itemProductId"
+                  WHERE pci."comboProductId" = oi."productId"
+                ),
+                '[]'::json
+              ) AS "comboItems"
        FROM order_items oi
        LEFT JOIN products p ON p.id = oi."productId"
        WHERE oi."orderId" = $1
@@ -693,6 +711,7 @@ export class OrdersService {
         lineDiscountAmount: this.toMoney(item.lineDiscountAmount),
         lineSurchargeAmount: this.toMoney(item.lineSurchargeAmount),
         note: item.note || '',
+        comboItems: Array.isArray(item.comboItems) ? item.comboItems : typeof item.comboItems === 'string' ? JSON.parse(item.comboItems) : [],
       })),
     };
   }
