@@ -495,7 +495,15 @@ export class OrdersService {
        LEFT JOIN tables t ON t.id = od."tableId"
        LEFT JOIN rooms r ON r.id = od."roomId"
        WHERE ${whereSql}
-       ORDER BY od."createdAt" DESC
+       ORDER BY CASE od."orderState"::text
+         WHEN 'UNPAID' THEN 1
+         WHEN 'PARTIAL' THEN 2
+         WHEN 'DRAFT' THEN 3
+         WHEN 'PAID' THEN 4
+         WHEN 'DELETED' THEN 99
+         ELSE 98
+       END ASC,
+       od."createdAt" DESC
        LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
       sqlParams,
     );
