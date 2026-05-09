@@ -445,7 +445,14 @@ export class OrdersService {
     };
     if (params.search?.trim()) {
       sqlParams.push(`%${params.search.trim()}%`);
-      where.push(`(od."orderCode" ILIKE $${sqlParams.length} OR COALESCE(od."customerName", '') ILIKE $${sqlParams.length})`);
+      where.push(`(
+        od."orderCode" ILIKE $${sqlParams.length}
+        OR COALESCE(od."customerName", '') ILIKE $${sqlParams.length}
+        OR COALESCE(a.name, ar.name, '') ILIKE $${sqlParams.length}
+        OR COALESCE(r.name, '') ILIKE $${sqlParams.length}
+        OR COALESCE(t.name, '') ILIKE $${sqlParams.length}
+        OR COALESCE(NULLIF(u."fullName", ''), u.username, '') ILIKE $${sqlParams.length}
+      )`);
     }
     if (params.orderStates?.length) {
       sqlParams.push(params.orderStates);
@@ -479,7 +486,17 @@ export class OrdersService {
       where.push(`od."createdAt" < $${sqlParams.length}::timestamptz`);
     }
     const whereSql = where.join(' AND ');
-    const totalRows = await this.db.query<{ total: string }>(`SELECT COUNT(*)::text AS total FROM orders od WHERE ${whereSql}`, sqlParams);
+    const totalRows = await this.db.query<{ total: string }>(
+      `SELECT COUNT(*)::text AS total
+       FROM orders od
+       LEFT JOIN users u ON u.id = od."userId"
+       LEFT JOIN tables t ON t.id = od."tableId"
+       LEFT JOIN rooms r ON r.id = od."roomId"
+       LEFT JOIN areas a ON a.id = t."areaId"
+       LEFT JOIN areas ar ON ar.id = r."areaId"
+       WHERE ${whereSql}`,
+      sqlParams,
+    );
     const total = Number(totalRows[0]?.total || 0);
     sqlParams.push(pageSize, (page - 1) * pageSize);
     const rows = await this.db.query<{
