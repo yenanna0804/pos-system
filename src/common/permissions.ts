@@ -29,6 +29,7 @@ export const ROLE_PERMISSIONS: Record<string, Set<PermissionKey>> = {
     Permission.ORDERS_VIEW,
     Permission.ORDERS_CREATE,
     Permission.ORDERS_UPDATE,
+    Permission.REPORTS_ACCESS,
     Permission.PRINTERS_ACCESS,
   ]),
 };
