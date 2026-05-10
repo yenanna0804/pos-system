@@ -1,9 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import type { QueryResultRow } from 'pg';
 import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
-import { PgService } from '../../database/pg.service';
+import { DbService } from '../../database/db.service';
 import { OrderPricingService, type AdjustmentMode, type PaymentMethod } from './order-pricing.service';
 
 type CreateOrderInput = {
@@ -89,7 +88,7 @@ type NormalizedItem = {
   note: string;
 };
 
-type OrdersExecutor = { query<T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<T[]> };
+type OrdersExecutor = { query<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> };
 
 type ItemLogSnapshot = {
   lineId: string;
@@ -111,7 +110,7 @@ type ItemLogSnapshot = {
 @Injectable()
 export class OrdersService {
   constructor(
-    private readonly db: PgService,
+    private readonly db: DbService,
     private readonly branchPolicy: BranchPolicyService,
     private readonly pricing: OrderPricingService,
   ) {}
@@ -164,8 +163,21 @@ export class OrdersService {
     const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
     const dd = String(now.getUTCDate()).padStart(2, '0');
     const prefix = `HD${yy}${mm}${dd}`;
-    const seq = await executor.query<{ nextSeq: string }>(`SELECT nextval('public.orders_order_code_seq')::text AS "nextSeq"`);
-    return `${prefix}${Number(seq[0]?.nextSeq || 1)}`;
+    const rows = await executor.query<{ code: string }>(
+      `SELECT "orderCode" AS code
+       FROM orders
+       WHERE "orderCode" LIKE $1
+       ORDER BY "createdAt" DESC
+       LIMIT 200`,
+      [`${prefix}%`],
+    );
+    let maxSeq = 0;
+    for (const row of rows) {
+      const matched = String(row.code || '').match(new RegExp(`^${prefix}(\\d+)$`));
+      if (!matched) continue;
+      maxSeq = Math.max(maxSeq, Number(matched[1]));
+    }
+    return `${prefix}${maxSeq + 1}`;
   }
 
   private async logAction(executor: OrdersExecutor, payload: { orderId: string; action: string; detail?: string; snapshot?: unknown; userId: string }) {
@@ -567,6 +579,21 @@ export class OrdersService {
       hasOpenTimeItems: items.some((it) => it.pricingTypeSnapshot === 'TIME' && it.stopAt == null),
       applyOpenTimeStateRule: !isDraftCreate,
     });
+    if (items.length === 0) {
+      totals.orderState = 'DELETED';
+      totals.paidAmount = 0;
+      totals.finalAmount = 0;
+      totals.subtotalAmount = 0;
+    }
+    if (items.length === 0) {
+      totals.orderState = 'DELETED';
+      totals.paidAmount = 0;
+      totals.finalAmount = 0;
+      totals.subtotalAmount = 0;
+    }
+    if (items.length === 0) {
+      totals.orderState = 'DELETED';
+    }
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod, 'CASH');
     let code = '';
     await this.db.withTransaction(async (tx) => {
@@ -802,6 +829,12 @@ export class OrdersService {
       hasOpenTimeItems: normalized.some((it) => it.pricingTypeSnapshot === 'TIME' && it.stopAt == null),
       applyOpenTimeStateRule: String(effectiveOrderState || rows[0].orderState || '').toUpperCase() !== 'DRAFT',
     });
+    if (normalized.length === 0) {
+      totals.orderState = 'DELETED';
+      totals.paidAmount = 0;
+      totals.finalAmount = 0;
+      totals.subtotalAmount = 0;
+    }
     const paymentMethod = this.normalizePaymentMethod(input.paymentMethod ?? rows[0].paymentMethod, 'CASH');
     const normalizedTableId = typeof input.tableId === 'string' ? input.tableId.trim() : input.tableId;
     const normalizedRoomId = typeof input.roomId === 'string' ? input.roomId.trim() : input.roomId;
@@ -1000,5 +1033,51 @@ export class OrdersService {
        FROM order_logs l LEFT JOIN users u ON u.id = l."createdBy" WHERE l."orderId" = $1 ORDER BY l."createdAt" DESC`,
       [id],
     );
+  }
+
+  async startTimer(user: CurrentUser, orderId: string, lineId: string) {
+    const now = new Date().toISOString();
+    await this.db.withTransaction(async (tx) => {
+      const orderRows = await tx.query<{ id: string; branchId: string | null }>('SELECT id, "branchId" AS "branchId" FROM orders WHERE id = $1 LIMIT 1', [orderId]);
+      if (!orderRows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
+      this.branchPolicy.assertResourceBranchAccess(user, orderRows[0].branchId);
+      const lineRows = await tx.query<{ id: string }>('SELECT id FROM order_items WHERE id = $1 AND "orderId" = $2 LIMIT 1', [lineId, orderId]);
+      if (!lineRows[0]) throw new NotFoundException('Dòng món không tồn tại');
+      await tx.query('UPDATE order_items SET "startAt" = $3, "stopAt" = NULL, "updatedAt" = NOW() WHERE id = $1 AND "orderId" = $2', [lineId, orderId, now]);
+    });
+    const lineRows = await this.db.query<{ unitPrice: string; timeRateMinutesSnapshot: number | null }>('SELECT "unitPrice"::text AS "unitPrice", "timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot" FROM order_items WHERE id = $1 LIMIT 1', [lineId]);
+    const unitPrice = this.toMoney(lineRows[0]?.unitPrice || 0);
+    const lineTotal = unitPrice;
+    await this.db.query('UPDATE order_items SET "totalPrice" = $2 WHERE id = $1', [lineId, lineTotal]);
+    return { orderItemId: lineId, clientLineId: lineId, timerStatus: 'RUNNING', lineTotal };
+  }
+
+  async stopTimer(user: CurrentUser, orderId: string, lineId: string) {
+    const now = new Date().toISOString();
+    const rows = await this.db.query<{ startAt: string | null; unitPrice: string; timeRateMinutesSnapshot: number | null }>(
+      'SELECT "startAt" AS "startAt", "unitPrice"::text AS "unitPrice", "timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot" FROM order_items WHERE id = $1 AND "orderId" = $2 LIMIT 1',
+      [lineId, orderId],
+    );
+    if (!rows[0]) throw new NotFoundException('Dòng món không tồn tại');
+    const startAt = rows[0].startAt || now;
+    const usedMinutes = Math.max(1, this.calculateUsedMinutesFromTimestamps(startAt, now) ?? 1);
+    const rateMinutes = Math.max(1, Number(rows[0].timeRateMinutesSnapshot || 60));
+    const lineTotal = this.calculateTimePrice(this.toMoney(rows[0].unitPrice), rateMinutes, usedMinutes);
+    await this.db.query('UPDATE order_items SET "stopAt" = $3, "usedMinutes" = $4, "totalPrice" = $5, "updatedAt" = NOW() WHERE id = $1 AND "orderId" = $2', [lineId, orderId, now, usedMinutes, lineTotal]);
+    return { orderItemId: lineId, clientLineId: lineId, timerStatus: 'STOPPED', lineTotal };
+  }
+
+  async startTimeLine(user: CurrentUser, orderId: string, dto: { clientLineId: string; lineSnapshot: { productId: string; productName?: string; unitPrice?: number; timeRateAmountSnapshot?: number; timeRateMinutesSnapshot?: number; note?: string } }) {
+    const lineId = this.isUuid(dto.clientLineId) ? dto.clientLineId : randomUUID();
+    const existing = await this.db.query<{ id: string }>('SELECT id FROM order_items WHERE id = $1 AND "orderId" = $2 LIMIT 1', [dto.clientLineId, orderId]);
+    if (!existing[0]) {
+      await this.db.query(
+        `INSERT INTO order_items (id, "orderId", "productId", quantity, "pricingTypeSnapshot", "baseUnitPrice", "unitPrice", "lineDiscountAmount", "lineSurchargeAmount", "totalPrice", "timeRateAmountSnapshot", "timeRateMinutesSnapshot", "usedMinutes", "startAt", "stopAt", "displayOrder", note, "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, 1, $4, $5, $6, 0, 0, $7, $8, $9, 0, $10, NULL, 1, $11, NOW(), NOW())`,
+        [lineId, orderId, dto.lineSnapshot.productId, 'TIME', this.toMoney(dto.lineSnapshot.timeRateAmountSnapshot ?? dto.lineSnapshot.unitPrice ?? 0), this.toMoney(dto.lineSnapshot.unitPrice ?? 0), this.toMoney(dto.lineSnapshot.unitPrice ?? 0), this.toMoney(dto.lineSnapshot.timeRateAmountSnapshot ?? dto.lineSnapshot.unitPrice ?? 0), Math.max(1, Number(dto.lineSnapshot.timeRateMinutesSnapshot || 60)), new Date().toISOString(), dto.lineSnapshot.note || null],
+      );
+    }
+    const timerStart = await this.startTimer(user, orderId, existing[0]?.id || lineId);
+    return { ...timerStart, clientLineId: dto.clientLineId };
   }
 }

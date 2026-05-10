@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { PgService } from '../../database/pg.service';
+import { DbService } from '../../database/db.service';
 
 @Injectable()
 export class BranchService {
-  constructor(private db: PgService) {}
+  constructor(private db: DbService) {}
 
   async findAll() {
     return this.db.query(

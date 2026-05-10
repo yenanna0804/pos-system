@@ -190,4 +190,23 @@ export class OrdersController {
     return this.ordersService.hardDelete(user, id);
   }
 
+  @Post('orders/:id/items/:lineId/timer/start')
+  startTimer(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Param('lineId') lineId: string) {
+    return this.ordersService.startTimer(user, id, lineId);
+  }
+
+  @Post('orders/:id/items/:lineId/timer/stop')
+  stopTimer(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Param('lineId') lineId: string) {
+    return this.ordersService.stopTimer(user, id, lineId);
+  }
+
+  @Post('orders/:id/commands/start-time-line')
+  startTimeLine(
+    @CurrentUser() user: CurrentUserType,
+    @Param('id') id: string,
+    @Body() dto: { clientLineId: string; lineSnapshot: { productId: string; productName?: string; unitPrice?: number; timeRateAmountSnapshot?: number; timeRateMinutesSnapshot?: number; note?: string } },
+  ) {
+    return this.ordersService.startTimeLine(user, id, dto);
+  }
+
 }

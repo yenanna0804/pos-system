@@ -1,8 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import type { QueryResultRow } from 'pg';
 import type { CurrentUser } from '../../common/auth.types';
 import { BranchPolicyService } from '../../common/branch-policy.service';
-import { PgService } from '../../database/pg.service';
+import { DbService } from '../../database/db.service';
 
 type ReportQuery = {
   branchId?: string;
@@ -36,7 +35,7 @@ type ReportRow = {
 @Injectable()
 export class ReportsService {
   constructor(
-    private readonly db: PgService,
+    private readonly db: DbService,
     private readonly branchPolicy: BranchPolicyService,
   ) {}
 
@@ -109,7 +108,7 @@ export class ReportsService {
     }
 
     const whereSql = where.join(' AND ');
-    const rows = await this.db.query<ReportRow & QueryResultRow>(
+    const rows = await this.db.query<ReportRow>(
       `SELECT
          od.id,
          od."orderCode" AS code,
