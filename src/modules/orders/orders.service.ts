@@ -434,6 +434,14 @@ export class OrdersService {
     if (!branchId) return { items: [], pagination: { page: 1, pageSize: 10, total: 0, totalPages: 1 } };
     const page = Math.max(1, Math.trunc(Number(params.page) || 1));
     const pageSize = Math.max(1, Math.min(100, Math.trunc(Number(params.pageSize) || 10)));
+    const now = new Date();
+    const isAfterNoon = now.getHours() >= 12;
+    const defaultStartDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0, 0);
+    if (!isAfterNoon) defaultStartDate.setDate(defaultStartDate.getDate() - 1);
+    const defaultEndDate = new Date(defaultStartDate);
+    defaultEndDate.setDate(defaultEndDate.getDate() + 1);
+    const defaultStart = `${defaultStartDate.getFullYear()}-${String(defaultStartDate.getMonth() + 1).padStart(2, '0')}-${String(defaultStartDate.getDate()).padStart(2, '0')}T12:00:00+07:00`;
+    const defaultEnd = `${defaultEndDate.getFullYear()}-${String(defaultEndDate.getMonth() + 1).padStart(2, '0')}-${String(defaultEndDate.getDate()).padStart(2, '0')}T12:00:00+07:00`;
     const where: string[] = ['od."branchId" = $1'];
     const sqlParams: unknown[] = [branchId];
     const buildExclusiveEnd = (value: string) => {
@@ -477,14 +485,12 @@ export class OrdersService {
       sqlParams.push(params.tableId);
       where.push(`od."tableId" = $${sqlParams.length}`);
     }
-    if (params.startDate) {
-      sqlParams.push(params.startDate);
-      where.push(`od."createdAt" >= $${sqlParams.length}::timestamptz`);
-    }
-    if (params.endDate) {
-      sqlParams.push(buildExclusiveEnd(params.endDate));
-      where.push(`od."createdAt" < $${sqlParams.length}::timestamptz`);
-    }
+    const effectiveStartDate = params.startDate?.trim() || defaultStart;
+    const effectiveEndDate = params.endDate?.trim() || defaultEnd;
+    sqlParams.push(effectiveStartDate);
+    where.push(`od."createdAt" >= $${sqlParams.length}::timestamptz`);
+    sqlParams.push(buildExclusiveEnd(effectiveEndDate));
+    where.push(`od."createdAt" < $${sqlParams.length}::timestamptz`);
     const whereSql = where.join(' AND ');
     const totalRows = await this.db.query<{ total: string }>(
       `SELECT COUNT(*)::text AS total

@@ -47,9 +47,16 @@ export class ReportsService {
   }
 
   private buildRange(startDate?: string, endDate?: string) {
-    const from = startDate?.trim();
-    const to = endDate?.trim();
-    if (!from || !to) throw new BadRequestException('Thiếu khoảng thời gian');
+    const now = new Date();
+    const isAfterNoon = now.getHours() >= 12;
+    const defaultStartDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0, 0);
+    if (!isAfterNoon) defaultStartDate.setDate(defaultStartDate.getDate() - 1);
+    const defaultEndDate = new Date(defaultStartDate);
+    defaultEndDate.setDate(defaultEndDate.getDate() + 1);
+    const defaultStart = `${defaultStartDate.getFullYear()}-${String(defaultStartDate.getMonth() + 1).padStart(2, '0')}-${String(defaultStartDate.getDate()).padStart(2, '0')}T12:00:00+07:00`;
+    const defaultEnd = `${defaultEndDate.getFullYear()}-${String(defaultEndDate.getMonth() + 1).padStart(2, '0')}-${String(defaultEndDate.getDate()).padStart(2, '0')}T12:00:00+07:00`;
+    const from = startDate?.trim() || defaultStart;
+    const to = endDate?.trim() || defaultEnd;
     const toDate = new Date(to);
     if (Number.isNaN(toDate.getTime())) {
       throw new BadRequestException('Thời gian kết thúc không hợp lệ');
