@@ -4,6 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 enum UserRole {
@@ -74,6 +75,7 @@ model User {
   orders   Order[]
   orderLogs OrderLog[]
 
+  @@index([branchId])
   @@map("users")
 }
 
@@ -139,6 +141,7 @@ model Product {
   orderItems OrderItem[]
   productBranches ProductBranch[]
 
+  @@index([categoryId])
   @@map("products")
 }
 
@@ -171,6 +174,7 @@ model Table {
   branch  Branch? @relation(fields: [branchId], references: [id])
   orders  Order[]
 
+  @@index([branchId])
   @@map("tables")
 }
 
@@ -203,6 +207,11 @@ model Order {
   items OrderItem[]
   logs  OrderLog[]
 
+  @@index([branchId, orderState])
+  @@index([branchId, createdAt])
+  @@index([tableId])
+  @@index([roomId])
+  @@index([userId])
   @@map("orders")
 }
 
@@ -247,6 +256,7 @@ model OrderItem {
   product Product @relation(fields: [productId], references: [id])
 
   @@index([orderId, displayOrder])
+  @@index([productId])
   @@map("order_items")
 }
 

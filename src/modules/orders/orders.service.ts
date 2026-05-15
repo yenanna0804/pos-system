@@ -642,25 +642,23 @@ export class OrdersService {
       `SELECT oi.id, oi."productId" AS "productId", p.name AS "productName", oi."pricingTypeSnapshot"::text AS "pricingTypeSnapshot", oi.quantity,
               oi."baseUnitPrice"::text AS "baseUnitPrice", oi."unitPrice"::text AS "unitPrice", oi."totalPrice"::text AS "totalPrice", oi."lineDiscountAmount"::text AS "lineDiscountAmount", oi."lineSurchargeAmount"::text AS "lineSurchargeAmount", oi."timeRateAmountSnapshot"::text AS "timeRateAmountSnapshot", oi."timeRateMinutesSnapshot" AS "timeRateMinutesSnapshot", oi."usedMinutes" AS "usedMinutes",
               oi."startAt"::text AS "startAt", oi."stopAt"::text AS "stopAt", oi.note, p.unit AS unit,
-              COALESCE(
-                (
-                  SELECT JSON_AGG(
-                    JSON_BUILD_OBJECT(
-                      'itemProductId', pci."itemProductId",
-                      'quantity', pci.quantity,
-                      'itemName', pi.name,
-                      'itemUnit', pi.unit
-                    )
-                    ORDER BY pi.name
-                  )
-                  FROM product_combo_items pci
-                  INNER JOIN products pi ON pi.id = pci."itemProductId"
-                  WHERE pci."comboProductId" = oi."productId"
-                ),
-                '[]'::json
-              ) AS "comboItems"
+              COALESCE(combo_agg.items, '[]'::json) AS "comboItems"
        FROM order_items oi
        LEFT JOIN products p ON p.id = oi."productId"
+       LEFT JOIN LATERAL (
+         SELECT JSON_AGG(
+           JSON_BUILD_OBJECT(
+             'itemProductId', pci."itemProductId",
+             'quantity', pci.quantity,
+             'itemName', pi.name,
+             'itemUnit', pi.unit
+           )
+           ORDER BY pi.name
+         ) AS items
+         FROM product_combo_items pci
+         INNER JOIN products pi ON pi.id = pci."itemProductId"
+         WHERE pci."comboProductId" = oi."productId"
+       ) combo_agg ON true
        WHERE oi."orderId" = $1
        ORDER BY oi."displayOrder" ASC, oi."createdAt" ASC`,
       [id],

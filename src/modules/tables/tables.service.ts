@@ -54,9 +54,11 @@ export class TablesService {
     const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, branchId);
     const rows = await this.db.query(
       `SELECT a.id, a.name, a."branchId", a."createdAt", a."updatedAt",
-              COALESCE((SELECT COUNT(*)::int FROM rooms r WHERE r."areaId" = a.id AND r."deletedAt" IS NULL), 0) AS "roomCount",
-              COALESCE((SELECT COUNT(*)::int FROM tables t WHERE t."areaId" = a.id AND t."deletedAt" IS NULL), 0) AS "tableCount"
+              COALESCE(rc."roomCount", 0)::int AS "roomCount",
+              COALESCE(tc."tableCount", 0)::int AS "tableCount"
        FROM areas a
+       LEFT JOIN (SELECT "areaId", COUNT(*)::int AS "roomCount" FROM rooms WHERE "deletedAt" IS NULL GROUP BY "areaId") rc ON rc."areaId" = a.id
+       LEFT JOIN (SELECT "areaId", COUNT(*)::int AS "tableCount" FROM tables WHERE "deletedAt" IS NULL GROUP BY "areaId") tc ON tc."areaId" = a.id
        WHERE a."deletedAt" IS NULL
          AND ($1::text IS NULL OR a."branchId" = $1)
        ORDER BY a."createdAt" DESC`,
@@ -144,9 +146,10 @@ export class TablesService {
     const rows = await this.db.query(
       `SELECT r.id, r.name, r."areaId", r."branchId", r."createdAt", r."updatedAt",
               a.name AS "areaName",
-              COALESCE((SELECT COUNT(*)::int FROM tables t WHERE t."roomId" = r.id AND t."deletedAt" IS NULL), 0) AS "tableCount"
+              COALESCE(tc."tableCount", 0)::int AS "tableCount"
        FROM rooms r
        INNER JOIN areas a ON a.id = r."areaId" AND a."deletedAt" IS NULL
+       LEFT JOIN (SELECT "roomId", COUNT(*)::int AS "tableCount" FROM tables WHERE "deletedAt" IS NULL GROUP BY "roomId") tc ON tc."roomId" = r.id
        WHERE r."deletedAt" IS NULL
          AND ($1::text IS NULL OR r."areaId" = $1)
          AND ($2::text IS NULL OR r."branchId" = $2)
