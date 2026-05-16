@@ -17,7 +17,7 @@ type CreateOrderDto = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
-  isDebt?: boolean;
+  isDebtMarked?: boolean;
   paymentMethod?: 'CASH' | 'BANKING';
   orderState?: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID';
   billItems: {
@@ -55,7 +55,7 @@ type UpdateOrderDto = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
-  isDebt?: boolean;
+  isDebtMarked?: boolean;
   paymentMethod?: 'CASH' | 'BANKING';
   orderState?: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID';
   billItems?: {

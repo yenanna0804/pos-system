@@ -162,7 +162,7 @@ describe('Order payment state integration', () => {
     expect(detailRes.body?.paymentMethod).toBe('BANKING');
   });
 
-  it('creates order and forces PARTIAL when isDebt is true', async () => {
+  it('creates order and forces PARTIAL when isDebtMarked is true', async () => {
     const loginRes = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ username, password: '123456', branchId: '' })
@@ -182,7 +182,7 @@ describe('Order payment state integration', () => {
         discountAmount: 0,
         surchargeAmount: 0,
         paidAmount: productPrice,
-        isDebt: true,
+        isDebtMarked: true,
         paymentMethod: 'CASH',
         billItems: [
           {
@@ -209,7 +209,7 @@ describe('Order payment state integration', () => {
       .expect(200);
 
     expect(detailRes.body?.orderState).toBe('PARTIAL');
-    expect(detailRes.body?.isDebt).toBe(true);
+    expect(detailRes.body?.isDebtMarked).toBe(true);
   });
 
   it('persists discount/surcharge mode and raw values across create and update', async () => {
