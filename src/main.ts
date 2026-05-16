@@ -18,6 +18,8 @@ async function bootstrap() {
   app.use(urlencoded({ extended: true, limit: '5mb' }));
   app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads' });
 
+  await app.init();
+
   const db = app.get(DbService);
   await seed(db);
 

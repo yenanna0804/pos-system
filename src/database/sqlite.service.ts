@@ -83,6 +83,7 @@ export class SqliteService extends DbService implements OnModuleInit, OnModuleDe
     });
 
     nextSql = nextSql
+      .replace(/CAST\(\?\s+AS\s+"[^"]+"\)/gi, '?')
       .replace(/CAST\(\$(\d+)\s+AS\s+"[^"]+"\)/gi, '?')
       .replace(/::"[^"]+"/g, '')
       .replace(/::text\[\]/g, '')
