@@ -19,6 +19,7 @@ type CreateOrderInput = {
   surchargeMode?: 'percent' | 'amount';
   surchargeValue?: number;
   paidAmount?: number;
+  isDebt?: boolean;
   paymentMethod?: 'CASH' | 'BANKING';
   orderState?: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID';
   billItems: {
@@ -329,6 +330,7 @@ export class OrdersService {
     surchargeValue?: unknown;
     surchargeAmount?: unknown;
     paidAmount?: unknown;
+    isDebt?: unknown;
     orderState?: unknown;
     hasOpenTimeItems?: boolean;
     applyOpenTimeStateRule?: boolean;
@@ -347,15 +349,18 @@ export class OrdersService {
       : this.toMoney(surchargeValue);
     const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
     const paidAmount = Math.min(this.toMoney(input.paidAmount), finalAmount);
+    const isDebt = Boolean(input.isDebt);
     const forcedOrderState = String(input.orderState || '').toUpperCase();
     const hasOpenTimeItems = Boolean(input.hasOpenTimeItems);
     const applyOpenTimeStateRule = Boolean(input.applyOpenTimeStateRule);
     const orderState = forcedOrderState === 'DRAFT'
       ? 'DRAFT'
+      : (isDebt || forcedOrderState === 'PARTIAL')
+        ? 'PARTIAL'
       : (paidAmount === 0
           ? (finalAmount === 0 ? 'PAID' : 'UNPAID')
           : (applyOpenTimeStateRule && hasOpenTimeItems ? 'PARTIAL' : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL')));
-    return { subtotalAmount, discountMode, discountValue, discountAmount, surchargeMode, surchargeValue, surchargeAmount, finalAmount, paidAmount, orderState };
+    return { subtotalAmount, discountMode, discountValue, discountAmount, surchargeMode, surchargeValue, surchargeAmount, finalAmount, paidAmount, orderState, isDebt };
   }
 
   private mapItemForSnapshot(item: {
@@ -507,13 +512,13 @@ export class OrdersService {
     sqlParams.push(pageSize, (page - 1) * pageSize);
     const rows = await this.db.query<{
       id: string; code: string; tableName: string | null; customerName: string | null; creatorName: string | null;
-      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; isDebt: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code,
               COALESCE(NULLIF(CONCAT_WS(' / ', COALESCE(a.name, ar.name), r.name, t.name), ''), '-') AS "tableName",
               od."customerName" AS "customerName",
               COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "creatorName",
-              od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount",
+              od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."isDebt" AS "isDebt",
               od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt" AS "createdAt"
        FROM orders od
        LEFT JOIN users u ON u.id = od."userId"
@@ -569,6 +574,7 @@ export class OrdersService {
       surchargeValue: input.surchargeValue,
       surchargeAmount: input.surchargeAmount,
       paidAmount: input.paidAmount,
+      isDebt: input.isDebt,
       orderState: input.orderState,
       hasOpenTimeItems: items.some((it) => it.pricingTypeSnapshot === 'TIME' && it.stopAt == null),
       applyOpenTimeStateRule: !isDraftCreate,
@@ -578,12 +584,12 @@ export class OrdersService {
     await this.db.withTransaction(async (tx) => {
       code = await this.generateOrderCode(tx);
       await tx.query(
-        `INSERT INTO orders (id, "orderCode", "tableId", "roomId", "branchId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount", "paidAmount", "paymentMethod", "orderState", "customerName", "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::"OrderAdjustmentMode", $10, $11, $12::"OrderAdjustmentMode", $13, $14, $15, $16::"PaymentMethod", $17::"OrderLifecycleState", $18, NOW(), NOW())`,
+        `INSERT INTO orders (id, "orderCode", "tableId", "roomId", "branchId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount", "paidAmount", "isDebt", "paymentMethod", "orderState", "customerName", "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::"OrderAdjustmentMode", $10, $11, $12::"OrderAdjustmentMode", $13, $14, $15, $16, $17::"PaymentMethod", $18::"OrderLifecycleState", $19, NOW(), NOW())`,
         [
           orderId, code, normalizedInput.entityType === 'TABLE' ? normalizedInput.tableId || null : null, normalizedInput.entityType === 'ROOM' ? normalizedInput.roomId || null : null,
           branchId, user.id, totals.subtotalAmount, totals.discountAmount, totals.discountMode, totals.discountValue,
-          totals.surchargeAmount, totals.surchargeMode, totals.surchargeValue, totals.finalAmount, totals.paidAmount, paymentMethod, totals.orderState,
+          totals.surchargeAmount, totals.surchargeMode, totals.surchargeValue, totals.finalAmount, totals.paidAmount, totals.isDebt, paymentMethod, totals.orderState,
           input.customerName || null,
         ],
       );
@@ -608,6 +614,7 @@ export class OrdersService {
             surchargeAmount: totals.surchargeAmount,
             finalAmount: totals.finalAmount,
             paidAmount: totals.paidAmount,
+            isDebt: totals.isDebt,
             paymentMethod,
             orderState: totals.orderState,
           },
@@ -622,12 +629,12 @@ export class OrdersService {
     const rows = await this.db.query<{
       id: string; code: string; tableId: string | null; roomId: string | null; tableName: string | null; roomName: string | null; areaName: string | null;
       customerName: string | null; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string;
-      totalAmount: string; finalAmount: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; isDebt: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code, od."tableId" AS "tableId", od."roomId" AS "roomId", t.name AS "tableName", r.name AS "roomName", COALESCE(a.name, ar.name) AS "areaName",
               od."customerName" AS "customerName", od."discountAmount"::text AS "discountAmount", od."discountMode"::text AS "discountMode", od."discountValue"::text AS "discountValue",
               od."surchargeAmount"::text AS "surchargeAmount", od."surchargeMode"::text AS "surchargeMode", od."surchargeValue"::text AS "surchargeValue",
-              od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."paymentMethod"::text AS "paymentMethod",
+              od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."isDebt" AS "isDebt", od."paymentMethod"::text AS "paymentMethod",
               od."orderState" AS "orderState", od."branchId" AS "branchId", od."createdAt" AS "createdAt", od."updatedAt" AS "updatedAt"
        FROM orders od
        LEFT JOIN tables t ON t.id = od."tableId"
@@ -690,6 +697,7 @@ export class OrdersService {
       totalAmount: this.toMoney(head.totalAmount),
       finalAmount: this.toMoney(head.finalAmount),
       paidAmount: this.toMoney(head.paidAmount),
+      isDebt: Boolean(head.isDebt),
       paymentMethod: head.paymentMethod,
       orderState: head.orderState,
       createdAt: head.createdAt,
@@ -721,8 +729,8 @@ export class OrdersService {
   }
 
   async updateOrder(user: CurrentUser, id: string, input: UpdateOrderInput) {
-    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>(
-      'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "totalAmount"::text AS "totalAmount", "finalAmount"::text AS "finalAmount", "discountAmount"::text AS "discountAmount", "discountMode", "discountValue"::text AS "discountValue", "surchargeAmount"::text AS "surchargeAmount", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
+    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; isDebt: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>(
+      'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "totalAmount"::text AS "totalAmount", "finalAmount"::text AS "finalAmount", "discountAmount"::text AS "discountAmount", "discountMode", "discountValue"::text AS "discountValue", "surchargeAmount"::text AS "surchargeAmount", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "isDebt" AS "isDebt", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
@@ -802,6 +810,7 @@ export class OrdersService {
       surchargeValue: input.surchargeValue,
       surchargeAmount: input.surchargeAmount ?? rows[0].surchargeValue,
       paidAmount: input.paidAmount ?? rows[0].paidAmount,
+      isDebt: input.isDebt ?? rows[0].isDebt,
       orderState: effectiveOrderState,
       hasOpenTimeItems: normalized.some((it) => it.pricingTypeSnapshot === 'TIME' && it.stopAt == null),
       applyOpenTimeStateRule: String(effectiveOrderState || rows[0].orderState || '').toUpperCase() !== 'DRAFT',
@@ -846,6 +855,7 @@ export class OrdersService {
       surchargeAmount: this.toMoney(rows[0].surchargeAmount),
       finalAmount: this.toMoney(rows[0].finalAmount),
       paidAmount: this.toMoney(rows[0].paidAmount),
+      isDebt: Boolean(rows[0].isDebt),
       paymentMethod: this.normalizePaymentMethod(rows[0].paymentMethod, 'CASH'),
       orderState: rows[0].orderState,
     };
@@ -862,6 +872,7 @@ export class OrdersService {
       totalAmount: totals.subtotalAmount,
       finalAmount: totals.finalAmount,
       paidAmount: totals.paidAmount,
+      isDebt: totals.isDebt,
       paymentMethod,
       orderState: totals.orderState,
     };
@@ -869,7 +880,7 @@ export class OrdersService {
     const orderChanges: Record<string, { from: unknown; to: unknown }> = {};
     const orderChangeKeys: Array<keyof typeof nextOrderSnapshot> = [
       'tableId', 'roomId', 'customerName', 'discountMode', 'discountValue', 'discountAmount', 'surchargeMode', 'surchargeValue', 'surchargeAmount',
-      'totalAmount', 'finalAmount', 'paidAmount', 'paymentMethod', 'orderState',
+      'totalAmount', 'finalAmount', 'paidAmount', 'isDebt', 'paymentMethod', 'orderState',
     ];
     for (const key of orderChangeKeys) {
       const prevValue = (previousOrderSnapshot as Record<string, unknown>)[key];
@@ -933,7 +944,7 @@ export class OrdersService {
       await tx.query(
         `UPDATE orders SET "tableId" = $2, "roomId" = $3, "customerName" = $4, "discountMode" = $5::"OrderAdjustmentMode", "discountValue" = $6,
                            "discountAmount" = $7, "surchargeMode" = $8::"OrderAdjustmentMode", "surchargeValue" = $9, "surchargeAmount" = $10,
-                           "totalAmount" = $11, "finalAmount" = $12, "paidAmount" = $13, "paymentMethod" = $14::"PaymentMethod", "orderState" = $15::"OrderLifecycleState", "updatedAt" = NOW()
+                           "totalAmount" = $11, "finalAmount" = $12, "paidAmount" = $13, "isDebt" = $14, "paymentMethod" = $15::"PaymentMethod", "orderState" = $16::"OrderLifecycleState", "updatedAt" = NOW()
          WHERE id = $1`,
         [
           id,
@@ -949,6 +960,7 @@ export class OrdersService {
           totals.subtotalAmount,
           totals.finalAmount,
           totals.paidAmount,
+          totals.isDebt,
           paymentMethod,
           totals.orderState,
         ],
