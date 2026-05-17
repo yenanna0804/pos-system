@@ -348,7 +348,7 @@ export class OrdersService {
       ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
       : this.toMoney(surchargeValue);
     const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
-    const paidAmount = Math.min(this.toMoney(input.paidAmount), finalAmount);
+    const paidAmount = Math.max(0, this.toMoney(input.paidAmount));
     const isDebtMarked = Boolean(input.isDebtMarked);
     const forcedOrderState = String(input.orderState || '').toUpperCase();
     const hasOpenTimeItems = Boolean(input.hasOpenTimeItems);
