@@ -183,7 +183,7 @@ export class ReportsService {
       // grossAmount = SUM(qty × baseUnitPrice) — giá gốc trước mọi điều chỉnh
       // = od.totalAmount (SUM lineTotal tại unitPrice) + lineDiscount - lineSurcharge
       const grossAmount = totalAmount + itemDiscountAmount - itemSurchargeAmount;
-      const discountAmount = this.toMoney(row.orderDiscountAmount) + itemDiscountAmount;
+      const discountAmount = this.toMoney(row.orderDiscountAmount);
       const serviceAmount = this.toMoney(row.orderSurchargeAmount) + itemSurchargeAmount;
       const debtAmount = Math.max(0, finalAmount - paidAmount);
       const qty = this.toMoney(row.totalQuantity);

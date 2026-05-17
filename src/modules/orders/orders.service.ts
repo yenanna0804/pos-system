@@ -323,6 +323,7 @@ export class OrdersService {
 
   private computeOrderTotals(input: {
     itemsSubtotal: number;
+    itemDiscountTotal?: unknown;
     discountMode?: unknown;
     discountValue?: unknown;
     discountAmount?: unknown;
@@ -340,14 +341,14 @@ export class OrdersService {
     const discountValue = this.toRawAdjustmentValue(input.discountValue ?? input.discountAmount);
     const surchargeValue = this.toRawAdjustmentValue(input.surchargeValue ?? input.surchargeAmount);
     const subtotalAmount = Math.max(0, this.toMoney(input.itemsSubtotal));
-    const discountAmount = discountMode === 'percent'
+    const invoiceDiscountAmount = discountMode === 'percent'
       ? this.toMoney(Math.min(subtotalAmount, (subtotalAmount * discountValue) / 100))
       : Math.min(subtotalAmount, this.toMoney(discountValue));
-    const subtotalAfterDiscount = Math.max(0, subtotalAmount - discountAmount);
+    const discountAmount = Math.max(0, this.toMoney(input.itemDiscountTotal ?? 0));
     const surchargeAmount = surchargeMode === 'percent'
-      ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
+      ? this.toMoney((subtotalAmount * surchargeValue) / 100)
       : this.toMoney(surchargeValue);
-    const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
+    const finalAmount = Math.max(0, subtotalAmount - invoiceDiscountAmount + surchargeAmount);
     const paidAmount = Math.max(0, this.toMoney(input.paidAmount));
     const isDebtMarked = Boolean(input.isDebtMarked);
     const forcedOrderState = String(input.orderState || '').toUpperCase();
@@ -567,6 +568,7 @@ export class OrdersService {
     }
     const totals = this.computeOrderTotals({
       itemsSubtotal: items.reduce((sum, it) => sum + it.lineTotal, 0),
+      itemDiscountTotal: items.reduce((sum, it) => sum + it.lineDiscountAmount, 0),
       discountMode: input.discountMode,
       discountValue: input.discountValue,
       discountAmount: input.discountAmount,
@@ -803,6 +805,7 @@ export class OrdersService {
     const normalized = await this.normalizeItems(id, nextBillItems);
     const totals = this.computeOrderTotals({
       itemsSubtotal: normalized.reduce((sum, it) => sum + it.lineTotal, 0),
+      itemDiscountTotal: normalized.reduce((sum, it) => sum + it.lineDiscountAmount, 0),
       discountMode: input.discountMode ?? rows[0].discountMode,
       discountValue: input.discountValue,
       discountAmount: input.discountAmount ?? rows[0].discountValue,

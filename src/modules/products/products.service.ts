@@ -785,20 +785,24 @@ export class ProductsService {
           'SELECT COALESCE(SUM("totalPrice"), 0)::text AS subtotal FROM order_items WHERE "orderId" = $1',
           [order.orderId],
         );
+        const itemDiscountRows = await tx.query<{ total: string }>(
+          'SELECT COALESCE(SUM("lineDiscountAmount"), 0)::text AS total FROM order_items WHERE "orderId" = $1',
+          [order.orderId],
+        );
         const subtotalAmount = this.toMoney(subtotalRows[0]?.subtotal || 0);
+        const itemDiscountTotal = this.toMoney(itemDiscountRows[0]?.total || 0);
 
         const discountValue = Math.max(0, Number(order.discountValue || 0));
         const surchargeValue = Math.max(0, Number(order.surchargeValue || 0));
-        const discountAmount =
+        const invoiceDiscountAmount =
           order.discountMode === 'percent'
             ? this.toMoney(Math.min(subtotalAmount, (subtotalAmount * discountValue) / 100))
             : Math.min(subtotalAmount, this.toMoney(discountValue));
-        const subtotalAfterDiscount = Math.max(0, subtotalAmount - discountAmount);
         const surchargeAmount =
           order.surchargeMode === 'percent'
-            ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
+            ? this.toMoney((subtotalAmount * surchargeValue) / 100)
             : this.toMoney(surchargeValue);
-        const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
+        const finalAmount = Math.max(0, subtotalAmount - invoiceDiscountAmount + surchargeAmount);
         const paidAmount = Math.max(0, this.toMoney(order.paidAmount));
         const nextOrderState = paidAmount === 0
           ? (finalAmount === 0 ? 'PAID' : 'UNPAID')
@@ -814,7 +818,7 @@ export class ProductsService {
                "orderState" = $7::"OrderLifecycleState",
                "updatedAt" = NOW()
            WHERE id = $1`,
-          [order.orderId, subtotalAmount, discountAmount, surchargeAmount, finalAmount, paidAmount, nextOrderState],
+          [order.orderId, subtotalAmount, itemDiscountTotal, surchargeAmount, finalAmount, paidAmount, nextOrderState],
         );
 
         await tx.query(
@@ -829,7 +833,8 @@ export class ProductsService {
               source: 'PRODUCT_DELETE',
               removedProductId: id,
               subtotalAmount,
-              discountAmount,
+              discountAmount: itemDiscountTotal,
+              invoiceDiscountAmount,
               surchargeAmount,
               finalAmount,
               paidAmount,
