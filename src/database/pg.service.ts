@@ -1,28 +1,21 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Pool, QueryResultRow } from 'pg';
-import { DbService } from './db.service';
 
 type QueryExecutor = {
   query<T extends QueryResultRow>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
 };
 
 @Injectable()
-export class PgService extends DbService implements OnModuleInit, OnModuleDestroy {
+export class PgService implements OnModuleInit, OnModuleDestroy {
   private readonly pool = new Pool({
     connectionString: process.env.DATABASE_URL,
   });
 
   async onModuleInit() {
-    if ((process.env.DB_DIALECT ?? 'postgres') === 'sqlite') {
-      return;
-    }
     await this.pool.query('SELECT 1');
   }
 
   async onModuleDestroy() {
-    if ((process.env.DB_DIALECT ?? 'postgres') === 'sqlite') {
-      return;
-    }
     await this.pool.end();
   }
 

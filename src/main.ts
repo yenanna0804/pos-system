@@ -4,7 +4,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { json, urlencoded } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
-import { DbService } from './database/db.service';
+import { PgService } from './database/pg.service';
 import { assertOrdersAdjustmentSchema } from './database/schema-guard';
 import { seed } from './database/seed';
 
@@ -18,9 +18,7 @@ async function bootstrap() {
   app.use(urlencoded({ extended: true, limit: '5mb' }));
   app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/uploads' });
 
-  await app.init();
-
-  const db = app.get(DbService);
+  const db = app.get(PgService);
   await seed(db);
 
   await app.listen(process.env.PORT ?? 3000);

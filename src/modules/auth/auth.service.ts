@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { DbService } from '../../database/db.service';
+import { PgService } from '../../database/pg.service';
 import * as bcrypt from 'bcryptjs';
 
 type UserRow = {
@@ -15,7 +15,7 @@ type UserRow = {
 
 @Injectable()
 export class AuthService {
-  constructor(private db: DbService) {}
+  constructor(private db: PgService) {}
 
   async login(username: string, password: string, branchId: string) {
     const users = await this.db.query<UserRow>(

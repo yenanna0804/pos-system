@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { DbService } from '../../database/db.service';
+import { PgService } from '../../database/pg.service';
 import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
 
@@ -20,7 +20,7 @@ import { VIETNAMESE_DIACRITICS_FROM, VIETNAMESE_DIACRITICS_TO } from '../../comm
 @Injectable()
 export class TablesService {
   constructor(
-    private db: DbService,
+    private db: PgService,
     private readonly branchPolicy: BranchPolicyService,
   ) {}
 
@@ -103,10 +103,10 @@ export class TablesService {
     if (!existed[0]) throw new NotFoundException('Khu vực không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
     await this.db.query(
-      `UPDATE orders
-        SET "tableId" = NULL, "roomId" = NULL, "updatedAt" = NOW()
-        WHERE "roomId" IN (SELECT r.id FROM rooms r WHERE r."areaId" = $1 AND r."deletedAt" IS NULL)
-           OR "tableId" IN (SELECT t.id FROM tables t WHERE t."areaId" = $1 AND t."deletedAt" IS NULL)`,
+      `UPDATE orders o
+       SET "tableId" = NULL, "roomId" = NULL, "updatedAt" = NOW()
+       WHERE o."roomId" IN (SELECT r.id FROM rooms r WHERE r."areaId" = $1 AND r."deletedAt" IS NULL)
+          OR o."tableId" IN (SELECT t.id FROM tables t WHERE t."areaId" = $1 AND t."deletedAt" IS NULL)`,
       [id],
     );
     await this.db.query('DELETE FROM tables WHERE "areaId" = $1 AND "deletedAt" IS NULL', [id]);
@@ -204,10 +204,10 @@ export class TablesService {
     if (!existed[0]) throw new NotFoundException('Phòng không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, existed[0].branchId);
     await this.db.query(
-      `UPDATE orders
-        SET "tableId" = NULL, "roomId" = NULL, "updatedAt" = NOW()
-        WHERE "roomId" = $1
-           OR "tableId" IN (SELECT t.id FROM tables t WHERE t."roomId" = $1 AND t."deletedAt" IS NULL)`,
+      `UPDATE orders o
+       SET "tableId" = NULL, "roomId" = NULL, "updatedAt" = NOW()
+       WHERE o."roomId" = $1
+          OR o."tableId" IN (SELECT t.id FROM tables t WHERE t."roomId" = $1 AND t."deletedAt" IS NULL)`,
       [id],
     );
     await this.db.query('DELETE FROM tables WHERE "roomId" = $1 AND "deletedAt" IS NULL', [id]);

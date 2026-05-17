@@ -4,8 +4,6 @@ import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { Client } from 'pg';
-import { open } from 'sqlite';
-import sqlite3 from 'sqlite3';
 import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { AppModule } from '../src/app.module';
@@ -21,56 +19,36 @@ describe('Order payment state integration', () => {
   let productPrice = 10000;
 
   beforeAll(async () => {
-    const dialect = process.env.DB_DIALECT ?? 'postgres';
+    const db = new Client({ connectionString: process.env.DATABASE_URL });
+    await db.connect();
+
+    const branchRows = await db.query<{ id: string }>('SELECT id FROM branches WHERE "isActive" = true ORDER BY name ASC LIMIT 1');
+    if (branchRows.rows.length === 0) throw new Error('No active branch found');
+    branchId = branchRows.rows[0].id;
+
+    const tableRows = await db.query<{ id: string }>(
+      'SELECT id FROM tables WHERE "deletedAt" IS NULL AND "isActive" = true AND "branchId" = $1 ORDER BY "createdAt" ASC LIMIT 1',
+      [branchId],
+    );
+    if (tableRows.rows.length === 0) throw new Error('No active table found');
+    tableId = tableRows.rows[0].id;
+
+    const productRows = await db.query<{ id: string; name: string; unit: string | null; price: string }>(
+      'SELECT id, name, unit, price::text AS price FROM products WHERE "deletedAt" IS NULL AND "isActive" = true ORDER BY "createdAt" ASC LIMIT 1',
+    );
+    if (productRows.rows.length === 0) throw new Error('No active product found');
+    productId = productRows.rows[0].id;
+    productName = productRows.rows[0].name;
+    productUnit = productRows.rows[0].unit || 'phan';
+    productPrice = Number(productRows.rows[0].price || 10000);
+
     const passwordHash = await bcrypt.hash('123456', 10);
-    if (dialect === 'sqlite') {
-      const sqlitePath = process.env.SQLITE_PATH || 'local/dev.sqlite';
-      const db = await open({ filename: sqlitePath, driver: sqlite3.Database });
-      const baseBranches = await db.all<{ id: string }[]>('SELECT id FROM branches WHERE "isActive" = 1 ORDER BY name ASC LIMIT 1');
-      if (baseBranches.length === 0) {
-        await db.run('INSERT INTO branches (id, name, "isActive", "createdAt", "updatedAt") VALUES (?, ?, 1, datetime(\'now\'), datetime(\'now\'))', [randomUUID(), 'Chi nhanh Test']);
-      }
-      const branchRows = await db.all<{ id: string }[]>('SELECT id FROM branches WHERE "isActive" = 1 ORDER BY name ASC LIMIT 1');
-      if (branchRows.length === 0) throw new Error('No active branch found');
-      branchId = branchRows[0].id;
-      const areaId = randomUUID();
-      await db.run('INSERT OR IGNORE INTO areas (id, name, "branchId", "createdAt", "updatedAt") VALUES (?, ?, ?, datetime(\'now\'), datetime(\'now\'))', [areaId, 'Khu A', branchId]);
-      await db.run('INSERT OR IGNORE INTO tables (id, name, capacity, status, "isActive", "branchId", "areaId", "createdAt", "updatedAt") VALUES (?, ?, 4, ?, 1, ?, ?, datetime(\'now\'), datetime(\'now\'))', [randomUUID(), 'Ban A1', 'AVAILABLE', branchId, areaId]);
-      await db.run('INSERT OR IGNORE INTO products (id, name, sku, "type", "autoPrice", price, stock, "isActive", "createdAt", "updatedAt") VALUES (?, ?, ?, ?, 0, ?, 10, 1, datetime(\'now\'), datetime(\'now\'))', [randomUUID(), 'SP Test', `SKU-${Date.now()}`, 'SINGLE', 10000]);
-      const tableRows = await db.all<{ id: string }[]>('SELECT id FROM tables WHERE "deletedAt" IS NULL AND "isActive" = 1 AND "branchId" = ? ORDER BY "createdAt" ASC LIMIT 1', [branchId]);
-      if (tableRows.length === 0) throw new Error('No active table found');
-      tableId = tableRows[0].id;
-      const productRows = await db.all<{ id: string; name: string; unit: string | null; price: string }[]>('SELECT id, name, unit, CAST(price AS TEXT) AS price FROM products WHERE "deletedAt" IS NULL AND "isActive" = 1 ORDER BY "createdAt" ASC LIMIT 1');
-      if (productRows.length === 0) throw new Error('No active product found');
-      productId = productRows[0].id;
-      productName = productRows[0].name;
-      productUnit = productRows[0].unit || 'phan';
-      productPrice = Number(productRows[0].price || 10000);
-      await db.run(
-        `INSERT INTO users (id, username, password, "fullName", role, "branchId", "isActive", "createdAt", "updatedAt")
-         VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))
-         ON CONFLICT(username) DO UPDATE SET password = excluded.password, role = excluded.role, "branchId" = excluded."branchId", "isActive" = 1, "updatedAt" = datetime('now')`,
-        [randomUUID(), username, passwordHash, 'Order State Tester', 'ADMIN', branchId],
-      );
-      await db.close();
-    } else {
-      const db = new Client({ connectionString: process.env.DATABASE_URL });
-      await db.connect();
-      const branchRows = await db.query<{ id: string }>('SELECT id FROM branches WHERE "isActive" = true ORDER BY name ASC LIMIT 1');
-      if (branchRows.rows.length === 0) throw new Error('No active branch found');
-      branchId = branchRows.rows[0].id;
-      const tableRows = await db.query<{ id: string }>('SELECT id FROM tables WHERE "deletedAt" IS NULL AND "isActive" = true AND "branchId" = $1 ORDER BY "createdAt" ASC LIMIT 1', [branchId]);
-      if (tableRows.rows.length === 0) throw new Error('No active table found');
-      tableId = tableRows.rows[0].id;
-      const productRows = await db.query<{ id: string; name: string; unit: string | null; price: string }>('SELECT id, name, unit, price::text AS price FROM products WHERE "deletedAt" IS NULL AND "isActive" = true ORDER BY "createdAt" ASC LIMIT 1');
-      if (productRows.rows.length === 0) throw new Error('No active product found');
-      productId = productRows.rows[0].id;
-      productName = productRows.rows[0].name;
-      productUnit = productRows.rows[0].unit || 'phan';
-      productPrice = Number(productRows.rows[0].price || 10000);
-      await db.query('INSERT INTO users (id, username, password, "fullName", role, "branchId", "isActive", "createdAt", "updatedAt") VALUES (gen_random_uuid()::text, $1, $2, $3, CAST($4 AS "UserRole"), $5, true, NOW(), NOW()) ON CONFLICT (username) DO UPDATE SET password = EXCLUDED.password, role = EXCLUDED.role, "branchId" = EXCLUDED."branchId", "isActive" = true, "updatedAt" = NOW()', [username, passwordHash, 'Order State Tester', 'ADMIN', branchId]);
-      await db.end();
-    }
+    await db.query(
+      'INSERT INTO users (id, username, password, "fullName", role, "branchId", "isActive", "createdAt", "updatedAt") VALUES (gen_random_uuid()::text, $1, $2, $3, CAST($4 AS "UserRole"), $5, true, NOW(), NOW()) ON CONFLICT (username) DO UPDATE SET password = EXCLUDED.password, role = EXCLUDED.role, "branchId" = EXCLUDED."branchId", "isActive" = true, "updatedAt" = NOW()',
+      [username, passwordHash, 'Order State Tester', 'ADMIN', branchId],
+    );
+
+    await db.end();
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],

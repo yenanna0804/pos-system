@@ -8,10 +8,6 @@ const REQUIRED_ORDER_COLUMNS = [
 ] as const;
 
 export async function assertOrdersAdjustmentSchema() {
-  if ((process.env.DB_DIALECT ?? 'postgres') === 'sqlite') {
-    return;
-  }
-
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
