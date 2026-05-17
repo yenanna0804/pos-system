@@ -894,7 +894,7 @@ export class ProductsService {
             ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
             : this.toMoney(surchargeValue);
         const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
-        const paidAmount = Math.min(this.toMoney(order.paidAmount), finalAmount);
+        const paidAmount = Math.max(0, this.toMoney(order.paidAmount));
         const nextOrderState = itemCount === 0
           ? 'DELETED'
           : (paidAmount === 0
