@@ -184,6 +184,56 @@ describe('Order payment state integration', () => {
     expect(detailRes.body?.paymentMethod).toBe('BANKING');
   });
 
+  it('creates order and forces PARTIAL when isDebtMarked is true', async () => {
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ username, password: '123456', branchId: '' })
+      .expect(201);
+
+    const token = loginRes.body?.token as string;
+    expect(token).toBeTruthy();
+
+    const createRes = await request(app.getHttpServer())
+      .post('/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        entityType: 'TABLE',
+        tableId,
+        customerName: 'Khach test debt',
+        totalAmount: productPrice,
+        discountAmount: 0,
+        surchargeAmount: 0,
+        paidAmount: productPrice,
+        isDebtMarked: true,
+        paymentMethod: 'CASH',
+        billItems: [
+          {
+            lineId: 'line-debt-1',
+            productId,
+            productName,
+            unit: productUnit,
+            baseUnitPrice: productPrice,
+            unitPrice: productPrice,
+            quantity: 1,
+            note: '',
+          },
+        ],
+        branchId,
+      })
+      .expect(201);
+
+    const orderId = createRes.body?.id as string;
+    expect(orderId).toBeTruthy();
+
+    const detailRes = await request(app.getHttpServer())
+      .get(`/orders/${orderId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    expect(detailRes.body?.orderState).toBe('PARTIAL');
+    expect(detailRes.body?.isDebtMarked).toBe(true);
+  });
+
   it('persists discount/surcharge mode and raw values across create and update', async () => {
     const loginRes = await request(app.getHttpServer())
       .post('/auth/login')

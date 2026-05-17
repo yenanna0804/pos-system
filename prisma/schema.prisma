@@ -74,6 +74,7 @@ model User {
   orders   Order[]
   orderLogs OrderLog[]
 
+  @@index([branchId])
   @@map("users")
 }
 
@@ -139,6 +140,7 @@ model Product {
   orderItems OrderItem[]
   productBranches ProductBranch[]
 
+  @@index([categoryId])
   @@map("products")
 }
 
@@ -171,6 +173,7 @@ model Table {
   branch  Branch? @relation(fields: [branchId], references: [id])
   orders  Order[]
 
+  @@index([branchId])
   @@map("tables")
 }
 
@@ -190,6 +193,7 @@ model Order {
   surchargeValue  Decimal       @default(0) @db.Decimal(12, 4)
   finalAmount    Decimal       @db.Decimal(12, 2)
   paidAmount      Decimal       @default(0) @db.Decimal(14, 2)
+  isDebtMarked   Boolean       @default(false)
   customerName    String?
   orderState      OrderLifecycleState @default(PARTIAL)
   paymentMethod  PaymentMethod?
@@ -203,6 +207,11 @@ model Order {
   items OrderItem[]
   logs  OrderLog[]
 
+  @@index([branchId, orderState])
+  @@index([branchId, createdAt])
+  @@index([tableId])
+  @@index([roomId])
+  @@index([userId])
   @@map("orders")
 }
 
@@ -247,6 +256,7 @@ model OrderItem {
   product Product @relation(fields: [productId], references: [id])
 
   @@index([orderId, displayOrder])
+  @@index([productId])
   @@map("order_items")
 }
 
