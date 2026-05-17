@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pos-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DB_DIALECT: sqlite
+      SQLITE_PATH: /data/dev.sqlite
+      ENABLE_DEV_SEED: "true"
+      SEED_BRANCH_NAME: "Main Branch"
+      SEED_ADMIN_USERNAME: "admin"
+      SEED_ADMIN_PASSWORD: "123456"
+      SEED_ADMIN_FULLNAME: "Admin"
+    ports:
+      - "3000:3000"
+    volumes:
+      - sqlite_data:/data
+
+volumes:
+  sqlite_data:

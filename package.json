@@ -9,6 +9,7 @@
     "build": "nest build",
     "migrate:repair:remove-draft-state": "prisma migrate resolve --rolled-back 20260430173000_remove_draft_state",
     "migrate:deploy": "prisma migrate deploy",
+    "sqlite:init": "node scripts/sqlite/init-db.mjs",
     "render:release": "npm run migrate:deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
@@ -36,7 +37,9 @@
     "prisma": "^7.8.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

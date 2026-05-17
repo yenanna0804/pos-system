@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import sharp from 'sharp';
-import { PgService } from '../../database/pg.service';
+import { DbService } from '../../database/db.service';
 import { BranchPolicyService } from '../../common/branch-policy.service';
 import type { CurrentUser } from '../../common/auth.types';
 import { VIETNAMESE_DIACRITICS_FROM, VIETNAMESE_DIACRITICS_TO } from '../../common/utils';
@@ -56,7 +56,7 @@ type ProductDeleteImpactOrder = {
 @Injectable()
 export class ProductsService {
   constructor(
-    private db: PgService,
+    private db: DbService,
     private readonly branchPolicy: BranchPolicyService,
   ) {}
 
@@ -143,6 +143,9 @@ export class ProductsService {
   }
 
   async listProducts(params: ListProductsParams, user: CurrentUser) {
+    if ((process.env.DB_DIALECT ?? 'postgres') === 'sqlite') {
+      return this.listProductsSqlite(params, user);
+    }
     const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
     const page = Math.max(1, Number(params.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(params.pageSize) || 20));
@@ -306,6 +309,105 @@ export class ProductsService {
         totalPages: Math.max(1, Math.ceil(total / pageSize)),
       },
     };
+  }
+
+  private async listProductsSqlite(params: ListProductsParams, user: CurrentUser) {
+    const scopedBranchId = this.branchPolicy.resolveReadBranchId(user, params.branchId);
+    const page = Math.max(1, Number(params.page) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(params.pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    const whereParts: string[] = ['p."deletedAt" IS NULL'];
+    const whereParams: unknown[] = [];
+    let whereIndex = 1;
+
+    if (params.categoryId) {
+      whereParts.push(`p."categoryId" = $${whereIndex++}`);
+      whereParams.push(params.categoryId);
+    }
+    if (params.type) {
+      whereParts.push(`p."type" = $${whereIndex++}`);
+      whereParams.push(params.type);
+    }
+    if (scopedBranchId) {
+      whereParts.push(`EXISTS (SELECT 1 FROM product_branches pbx WHERE pbx."productId" = p.id AND pbx."branchId" = $${whereIndex++} AND pbx."isActive" = true)`);
+      whereParams.push(scopedBranchId);
+    }
+    if (params.search?.trim()) {
+      whereParts.push(`(lower(COALESCE(p.name, '')) LIKE lower($${whereIndex}) OR lower(COALESCE(c.name, '')) LIKE lower($${whereIndex}) OR lower(COALESCE(p.sku, '')) LIKE lower($${whereIndex}))`);
+      whereParams.push(`%${params.search.trim()}%`);
+      whereIndex += 1;
+    }
+    const whereSql = whereParts.join(' AND ');
+
+    const rows = await this.db.query<any>(
+      `SELECT p.id, p.sku, p.name, p."type", p."autoPrice", p.price, p."costPrice", p.unit, p.weight,
+              p."timeRateAmount", p."timeRateMinutes", p."isActive", p."createdAt", COALESCE(p."imageThumb", p."imageUrl") AS "imageThumb",
+              c.id AS "categoryId", c.name AS "categoryName"
+       FROM products p
+       LEFT JOIN categories c ON c.id = p."categoryId" AND c."deletedAt" IS NULL
+       WHERE ${whereSql}
+       ORDER BY p."createdAt" DESC`,
+      whereParams,
+    );
+
+    const productIds = rows.map((r: any) => r.id);
+    const branchRows = productIds.length
+      ? await this.db.query<any>(
+        `SELECT pb."productId" AS "productId", pb."branchId" AS "branchId", b.name AS "branchName", pb."isActive" AS "isActive", pb.stock AS stock
+         FROM product_branches pb
+         LEFT JOIN branches b ON b.id = pb."branchId"
+         WHERE pb."productId" = ANY($1::text[])`,
+        [productIds],
+      )
+      : [];
+
+    const comboRows = productIds.length
+      ? await this.db.query<any>(
+        `SELECT pci."comboProductId" AS "comboProductId", pci."itemProductId" AS "itemProductId", pci.quantity AS quantity, pi.name AS "itemName", pi.unit AS "itemUnit"
+         FROM product_combo_items pci
+         LEFT JOIN products pi ON pi.id = pci."itemProductId"
+         WHERE pci."comboProductId" = ANY($1::text[])`,
+        [productIds],
+      )
+      : [];
+
+    const byProductBranches = new Map<string, any[]>();
+    for (const row of branchRows) {
+      const list = byProductBranches.get(row.productId) || [];
+      list.push({ branchId: row.branchId, branchName: row.branchName, isActive: Boolean(row.isActive), stock: Number(row.stock || 0) });
+      byProductBranches.set(row.productId, list);
+    }
+    const byProductCombo = new Map<string, any[]>();
+    for (const row of comboRows) {
+      const list = byProductCombo.get(row.comboProductId) || [];
+      list.push({ itemProductId: row.itemProductId, quantity: Number(row.quantity || 0), itemName: row.itemName, itemUnit: row.itemUnit });
+      byProductCombo.set(row.comboProductId, list);
+    }
+
+    let items = rows.map((item: any) => {
+      const branchConfigs = byProductBranches.get(item.id) || [];
+      const visibleConfigs = scopedBranchId ? branchConfigs.filter((cfg) => cfg.branchId === scopedBranchId) : branchConfigs;
+      const stock = visibleConfigs.reduce((sum, cfg) => sum + Number(cfg.stock || 0), 0);
+      return {
+        ...item,
+        price: this.toMoney(item.price),
+        costPrice: item.costPrice == null ? null : this.toMoney(item.costPrice),
+        timeRateAmount: item.timeRateAmount == null ? null : this.toMoney(item.timeRateAmount),
+        stock,
+        branchNames: visibleConfigs.map((cfg) => cfg.branchName).filter(Boolean).join(', '),
+        branchConfigs: visibleConfigs,
+        comboItems: byProductCombo.get(item.id) || [],
+      };
+    });
+
+    if (params.stockStatus === 'in_stock') items = items.filter((i) => Number(i.stock || 0) > 0);
+    if (params.stockStatus === 'out_of_stock') items = items.filter((i) => Number(i.stock || 0) <= 0);
+
+    const total = items.length;
+    items = items.slice(offset, offset + pageSize);
+
+    return { items, pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) } };
   }
 
   async getProductById(id: string, user: CurrentUser) {
@@ -763,16 +865,9 @@ export class ProductsService {
         [id],
       );
 
-      const removedRows = await tx.query<{ removedCount: string }>(
-        `WITH deleted_rows AS (
-           DELETE FROM order_items
-           WHERE "productId" = $1
-           RETURNING id
-         )
-         SELECT COUNT(*)::text AS "removedCount" FROM deleted_rows`,
-        [id],
-      );
-      const removedItems = Number(removedRows[0]?.removedCount || '0');
+      const beforeRows = await tx.query<{ removedCount: string }>('SELECT COUNT(*)::text AS "removedCount" FROM order_items WHERE "productId" = $1', [id]);
+      const removedItems = Number(beforeRows[0]?.removedCount || '0');
+      await tx.query('DELETE FROM order_items WHERE "productId" = $1', [id]);
 
       for (const order of impactedOrders) {
         const itemCountRows = await tx.query<{ itemCount: string }>(
@@ -799,10 +894,12 @@ export class ProductsService {
             ? this.toMoney((subtotalAfterDiscount * surchargeValue) / 100)
             : this.toMoney(surchargeValue);
         const finalAmount = Math.max(0, subtotalAmount - discountAmount + surchargeAmount);
-        const paidAmount = Math.min(this.toMoney(order.paidAmount), finalAmount);
-        const nextOrderState = paidAmount === 0
-          ? (finalAmount === 0 ? 'PAID' : 'UNPAID')
-          : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL');
+        const paidAmount = Math.max(0, this.toMoney(order.paidAmount));
+        const nextOrderState = itemCount === 0
+          ? 'DELETED'
+          : (paidAmount === 0
+              ? (finalAmount === 0 ? 'PAID' : 'UNPAID')
+              : (paidAmount >= finalAmount ? 'PAID' : 'PARTIAL'));
 
         await tx.query(
           `UPDATE orders

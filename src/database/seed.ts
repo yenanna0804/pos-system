@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto';
-import { PgService } from './pg.service';
+import { DbService } from './db.service';
 import * as bcrypt from 'bcryptjs';
 
 type BranchRow = { id: string };
 
-export async function seed(db: PgService) {
+export async function seed(db: DbService) {
   if (process.env.ENABLE_DEV_SEED !== 'true') {
     return;
   }
