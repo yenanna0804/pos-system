@@ -161,6 +161,14 @@ export class OrdersController {
     });
   }
 
+  @Get('orders/active-location-counts')
+  getActiveLocationCounts(
+    @CurrentUser() user: CurrentUserType,
+    @Query('branchId') branchId?: string,
+  ) {
+    return this.ordersService.getActiveLocationCounts(user, branchId);
+  }
+
   @Post('orders')
   createOrder(@CurrentUser() user: CurrentUserType, @Body() dto: CreateOrderDto) {
     return this.ordersService.createOrder(user, dto);

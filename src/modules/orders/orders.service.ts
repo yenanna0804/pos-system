@@ -547,6 +547,44 @@ export class OrdersService {
     };
   }
 
+  async getActiveLocationCounts(user: CurrentUser, requestedBranchId?: string) {
+    const branchId = this.branchPolicy.resolveReadBranchId(user, requestedBranchId);
+    const params: unknown[] = [];
+    let whereSql = 'WHERE od."orderState" IN ($1::"OrderLifecycleState", $2::"OrderLifecycleState")';
+    params.push('PAYING', 'UNPAID');
+    if (branchId) {
+      params.push(branchId);
+      whereSql += ` AND od."branchId" = $${params.length}`;
+    }
+    const rows = await this.db.query<{
+      tableId: string | null;
+      roomId: string | null;
+      payingCount: string;
+      unpaidCount: string;
+    }>(
+      `SELECT od."tableId" AS "tableId",
+              od."roomId" AS "roomId",
+              SUM(CASE WHEN od."orderState" = 'PAYING'::"OrderLifecycleState" THEN 1 ELSE 0 END)::text AS "payingCount",
+              SUM(CASE WHEN od."orderState" = 'UNPAID'::"OrderLifecycleState" THEN 1 ELSE 0 END)::text AS "unpaidCount"
+       FROM orders od
+       ${whereSql}
+       GROUP BY od."tableId", od."roomId"`,
+      params,
+    );
+
+    const tableCounts: Array<{ tableId: string; payingCount: number; unpaidCount: number }> = [];
+    const roomCounts: Array<{ roomId: string; payingCount: number; unpaidCount: number }> = [];
+
+    rows.forEach((row) => {
+      const payingCount = Math.max(0, Math.trunc(Number(row.payingCount || 0)));
+      const unpaidCount = Math.max(0, Math.trunc(Number(row.unpaidCount || 0)));
+      if (row.tableId) tableCounts.push({ tableId: row.tableId, payingCount, unpaidCount });
+      if (row.roomId) roomCounts.push({ roomId: row.roomId, payingCount, unpaidCount });
+    });
+
+    return { tableCounts, roomCounts };
+  }
+
   async createOrder(user: CurrentUser, input: CreateOrderInput) {
     if (input.entityType && input.entityType !== 'TABLE' && input.entityType !== 'ROOM') throw new BadRequestException('Loại đối tượng hóa đơn không hợp lệ');
     const orderId = randomUUID();
