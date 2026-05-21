@@ -54,6 +54,7 @@ export class ProductsController {
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
     @Query('type') type?: 'SINGLE' | 'COMBO' | 'TIME',
+    @Query('types') types?: string,
     @Query('categoryId') categoryId?: string,
     @Query('stockStatus') stockStatus?: 'all' | 'in_stock' | 'out_of_stock',
     @Query('branchId') branchId?: string,
@@ -63,6 +64,12 @@ export class ProductsController {
       page: Number(page) || 1,
       pageSize: Number(pageSize) || 20,
       type: type || undefined,
+      types: types
+        ? types
+          .split(',')
+          .map((value) => value.trim().toUpperCase())
+          .filter((value): value is 'SINGLE' | 'COMBO' | 'TIME' => value === 'SINGLE' || value === 'COMBO' || value === 'TIME')
+        : undefined,
       categoryId: categoryId || undefined,
       stockStatus: stockStatus || 'all',
       branchId: branchId || undefined,

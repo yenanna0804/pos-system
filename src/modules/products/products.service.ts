@@ -29,6 +29,7 @@ type ListProductsParams = {
   page: number;
   pageSize: number;
   type?: 'SINGLE' | 'COMBO' | 'TIME';
+  types?: Array<'SINGLE' | 'COMBO' | 'TIME'>;
   categoryId?: string;
   stockStatus?: 'all' | 'in_stock' | 'out_of_stock';
   branchId?: string;
@@ -161,6 +162,10 @@ export class ProductsService {
     if (params.type) {
       whereParts.push(`p."type" = $${whereIndex}`);
       whereParams.push(params.type);
+      whereIndex += 1;
+    } else if (Array.isArray(params.types) && params.types.length > 0) {
+      whereParts.push(`p."type"::text = ANY($${whereIndex}::text[])`);
+      whereParams.push(params.types);
       whereIndex += 1;
     }
 
