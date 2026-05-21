@@ -118,6 +118,12 @@ type UpdateOrderDto = {
   applySaveStatusRules?: boolean;
 };
 
+type PrintOrderDto = {
+  success?: boolean;
+  printType?: 'INVOICE' | 'ORDER_SLIP';
+  message?: string;
+};
+
 @Controller()
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
@@ -171,8 +177,8 @@ export class OrdersController {
   }
 
   @Post('orders/:id/print')
-  printOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string) {
-    return this.ordersService.printOrder(user, id);
+  printOrder(@CurrentUser() user: CurrentUserType, @Param('id') id: string, @Body() dto?: PrintOrderDto) {
+    return this.ordersService.printOrder(user, id, dto);
   }
 
   @Get('orders/:id/logs')

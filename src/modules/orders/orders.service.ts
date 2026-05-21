@@ -513,7 +513,7 @@ export class OrdersService {
     sqlParams.push(pageSize, (page - 1) * pageSize);
     const rows = await this.db.query<{
       id: string; code: string; tableName: string | null; customerName: string | null; creatorName: string | null;
-      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code,
               COALESCE(NULLIF(CONCAT_WS(' / ', COALESCE(a.name, ar.name), r.name, t.name), ''), '-') AS "tableName",
@@ -529,14 +529,15 @@ export class OrdersService {
        LEFT JOIN areas ar ON ar.id = r."areaId"
        WHERE ${whereSql}
        ORDER BY CASE od."orderState"::text
-         WHEN 'UNPAID' THEN 1
-         WHEN 'PARTIAL' THEN 2
-         WHEN 'DRAFT' THEN 3
-         WHEN 'PAID' THEN 4
-         WHEN 'DELETED' THEN 99
-         ELSE 98
-       END ASC,
-       od."createdAt" DESC
+          WHEN 'PAYING' THEN 1
+          WHEN 'UNPAID' THEN 2
+          WHEN 'PARTIAL' THEN 3
+          WHEN 'PAID' THEN 4
+          WHEN 'DRAFT' THEN 5
+          WHEN 'DELETED' THEN 99
+          ELSE 98
+        END ASC,
+        od."createdAt" DESC
        LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
       sqlParams,
     );
@@ -631,7 +632,7 @@ export class OrdersService {
     const rows = await this.db.query<{
       id: string; code: string; tableId: string | null; roomId: string | null; tableName: string | null; roomName: string | null; areaName: string | null;
       customerName: string | null; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string;
-      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; updatedAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code, od."tableId" AS "tableId", od."roomId" AS "roomId", t.name AS "tableName", r.name AS "roomName", COALESCE(a.name, ar.name) AS "areaName",
               od."customerName" AS "customerName", od."discountAmount"::text AS "discountAmount", od."discountMode"::text AS "discountMode", od."discountValue"::text AS "discountValue",
@@ -731,7 +732,7 @@ export class OrdersService {
   }
 
   async updateOrder(user: CurrentUser, id: string, input: UpdateOrderInput) {
-    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>(
+    const rows = await this.db.query<{ id: string; branchId: string | null; tableId: string | null; roomId: string | null; customerName: string | null; totalAmount: string; finalAmount: string; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>(
       'SELECT id, "branchId" AS "branchId", "tableId" AS "tableId", "roomId" AS "roomId", "customerName" AS "customerName", "totalAmount"::text AS "totalAmount", "finalAmount"::text AS "finalAmount", "discountAmount"::text AS "discountAmount", "discountMode", "discountValue"::text AS "discountValue", "surchargeAmount"::text AS "surchargeAmount", "surchargeMode", "surchargeValue"::text AS "surchargeValue", "paidAmount"::text AS "paidAmount", "isDebtMarked" AS "isDebtMarked", "paymentMethod"::text AS "paymentMethod", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
       [id],
     );
@@ -978,7 +979,7 @@ export class OrdersService {
   }
 
   async markDeleted(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
+    const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>('SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1', [id]);
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
 
@@ -998,12 +999,30 @@ export class OrdersService {
     await this.db.query('DELETE FROM orders WHERE id = $1', [id]);
     return { success: true };
   }
-  async printOrder(user: CurrentUser, id: string) {
-    const rows = await this.db.query<{ id: string; branchId: string | null }>('SELECT id, "branchId" AS "branchId" FROM orders WHERE id = $1 LIMIT 1', [id]);
+  async printOrder(user: CurrentUser, id: string, payload?: { success?: boolean; printType?: 'INVOICE' | 'ORDER_SLIP'; message?: string }) {
+    const rows = await this.db.query<{ id: string; branchId: string | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED' }>(
+      'SELECT id, "branchId" AS "branchId", "orderState" AS "orderState" FROM orders WHERE id = $1 LIMIT 1',
+      [id],
+    );
     if (!rows[0]) throw new NotFoundException('Hóa đơn không tồn tại');
     this.branchPolicy.assertResourceBranchAccess(user, rows[0].branchId);
+    const printType = payload?.printType === 'ORDER_SLIP' ? 'Phiếu order' : 'Hóa đơn';
+    const isSuccess = payload?.success !== false;
+    const detail = `${isSuccess ? 'In thành công' : 'In thất bại'} ${printType}${payload?.message ? `: ${String(payload.message).slice(0, 500)}` : ''}`;
     await this.db.withTransaction(async (tx) => {
-      await this.logAction(tx, { orderId: id, action: 'PRINT_ORDER', detail: 'In hóa đơn', userId: user.id });
+      await this.logAction(tx, {
+        orderId: id,
+        action: 'PRINT_ORDER',
+        detail,
+        userId: user.id,
+        snapshot: {
+          printType: payload?.printType === 'ORDER_SLIP' ? 'ORDER_SLIP' : 'INVOICE',
+          success: isSuccess,
+        },
+      });
+      if (isSuccess && payload?.printType === 'INVOICE' && (rows[0].orderState === 'DRAFT' || rows[0].orderState === 'UNPAID' || rows[0].orderState === 'PARTIAL')) {
+        await tx.query('UPDATE orders SET "orderState" = $2::"OrderLifecycleState", "updatedAt" = NOW() WHERE id = $1', [id, 'PAYING']);
+      }
     });
     return { success: true };
   }
