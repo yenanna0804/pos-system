@@ -513,14 +513,14 @@ export class OrdersService {
     sqlParams.push(pageSize, (page - 1) * pageSize);
     const rows = await this.db.query<{
       id: string; code: string; tableName: string | null; customerName: string | null; creatorName: string | null;
-      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string; leftTime: string | null;
+      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; createdAt: string; leftAt: string | null;
     }>(
       `SELECT od.id, od."orderCode" AS code,
               COALESCE(NULLIF(CONCAT_WS(' / ', COALESCE(a.name, ar.name), r.name, t.name), ''), '-') AS "tableName",
               od."customerName" AS "customerName",
               COALESCE(NULLIF(u."fullName", ''), u.username, '-') AS "creatorName",
               od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."isDebtMarked" AS "isDebtMarked",
-              od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt" AS "createdAt", od."leftTime" AS "leftTime"
+              od."paymentMethod"::text AS "paymentMethod", od."orderState" AS "orderState", od."createdAt" AS "createdAt", od."leftAt" AS "leftAt"
        FROM orders od
        LEFT JOIN users u ON u.id = od."userId"
        LEFT JOIN tables t ON t.id = od."tableId"
@@ -625,7 +625,7 @@ export class OrdersService {
     await this.db.withTransaction(async (tx) => {
       code = await this.generateOrderCode(tx);
       await tx.query(
-        `INSERT INTO orders (id, "orderCode", "tableId", "roomId", "branchId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount", "paidAmount", "isDebtMarked", "paymentMethod", "orderState", "customerName", "leftTime", "createdAt", "updatedAt")
+        `INSERT INTO orders (id, "orderCode", "tableId", "roomId", "branchId", "userId", "totalAmount", "discountAmount", "discountMode", "discountValue", "surchargeAmount", "surchargeMode", "surchargeValue", "finalAmount", "paidAmount", "isDebtMarked", "paymentMethod", "orderState", "customerName", "leftAt", "createdAt", "updatedAt")
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::"OrderAdjustmentMode", $10, $11, $12::"OrderAdjustmentMode", $13, $14, $15, $16, $17::"PaymentMethod", $18::"OrderLifecycleState", $19,
            CASE WHEN $15::numeric > 0 OR $16::boolean = true THEN NOW() ELSE NULL END,
            NOW(), NOW())`,
@@ -672,13 +672,13 @@ export class OrdersService {
     const rows = await this.db.query<{
       id: string; code: string; tableId: string | null; roomId: string | null; tableName: string | null; roomName: string | null; areaName: string | null;
       customerName: string | null; discountAmount: string; discountMode: AdjustmentMode; discountValue: string; surchargeAmount: string; surchargeMode: AdjustmentMode; surchargeValue: string;
-      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; leftTime: string | null; updatedAt: string;
+      totalAmount: string; finalAmount: string; paidAmount: string; isDebtMarked: boolean; paymentMethod: PaymentMethod | null; orderState: 'DRAFT' | 'PAYING' | 'PAID' | 'PARTIAL' | 'UNPAID' | 'DELETED'; branchId: string | null; createdAt: string; leftAt: string | null; updatedAt: string;
     }>(
       `SELECT od.id, od."orderCode" AS code, od."tableId" AS "tableId", od."roomId" AS "roomId", t.name AS "tableName", r.name AS "roomName", COALESCE(a.name, ar.name) AS "areaName",
               od."customerName" AS "customerName", od."discountAmount"::text AS "discountAmount", od."discountMode"::text AS "discountMode", od."discountValue"::text AS "discountValue",
               od."surchargeAmount"::text AS "surchargeAmount", od."surchargeMode"::text AS "surchargeMode", od."surchargeValue"::text AS "surchargeValue",
               od."totalAmount"::text AS "totalAmount", od."finalAmount"::text AS "finalAmount", od."paidAmount"::text AS "paidAmount", od."isDebtMarked" AS "isDebtMarked", od."paymentMethod"::text AS "paymentMethod",
-              od."orderState" AS "orderState", od."branchId" AS "branchId", od."createdAt" AS "createdAt", od."leftTime" AS "leftTime", od."updatedAt" AS "updatedAt"
+              od."orderState" AS "orderState", od."branchId" AS "branchId", od."createdAt" AS "createdAt", od."leftAt" AS "leftAt", od."updatedAt" AS "updatedAt"
        FROM orders od
        LEFT JOIN tables t ON t.id = od."tableId"
        LEFT JOIN rooms r ON r.id = od."roomId"
@@ -744,7 +744,7 @@ export class OrdersService {
       paymentMethod: head.paymentMethod,
       orderState: head.orderState,
       createdAt: head.createdAt,
-      leftTime: head.leftTime,
+      leftAt: head.leftAt,
       updatedAt: head.updatedAt,
       items: itemRows.map((item) => ({
         lineId: item.id,
@@ -990,7 +990,7 @@ export class OrdersService {
         `UPDATE orders SET "tableId" = $2, "roomId" = $3, "customerName" = $4, "discountMode" = $5::"OrderAdjustmentMode", "discountValue" = $6,
                            "discountAmount" = $7, "surchargeMode" = $8::"OrderAdjustmentMode", "surchargeValue" = $9, "surchargeAmount" = $10,
                            "totalAmount" = $11, "finalAmount" = $12, "paidAmount" = $13, "isDebtMarked" = $14, "paymentMethod" = $15::"PaymentMethod", "orderState" = $16::"OrderLifecycleState",
-                           "leftTime" = COALESCE("leftTime", CASE WHEN $13::numeric > 0 OR $14::boolean = true THEN NOW() ELSE NULL END),
+                           "leftAt" = COALESCE("leftAt", CASE WHEN $13::numeric > 0 OR $14::boolean = true THEN NOW() ELSE NULL END),
                            "updatedAt" = NOW()
          WHERE id = $1`,
         [

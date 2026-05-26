@@ -200,7 +200,7 @@ model Order {
   paymentMethod  PaymentMethod?
   note           String?
   createdAt      DateTime      @default(now()) @db.Timestamptz(3)
-  leftTime       DateTime?     @db.Timestamptz(3)
+  leftAt         DateTime?     @db.Timestamptz(3)
   updatedAt      DateTime      @updatedAt @db.Timestamptz(3)
 
   table Table?  @relation(fields: [tableId], references: [id])
