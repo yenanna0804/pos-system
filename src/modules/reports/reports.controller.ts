@@ -45,6 +45,8 @@ export class ReportsController {
     @Query('search') search?: string,
     @Query('type') type?: 'SINGLE' | 'COMBO' | 'TIME',
     @Query('stockStatus') stockStatus?: 'all' | 'in_stock' | 'out_of_stock',
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
   ) {
     return this.reportsService.getProductReport(user, {
       branchId,
@@ -54,6 +56,8 @@ export class ReportsController {
       search,
       type,
       stockStatus,
+      page: Number(page) || 1,
+      pageSize: Number(pageSize) || 100,
     });
   }
 }

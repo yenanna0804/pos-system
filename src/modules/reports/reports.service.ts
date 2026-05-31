@@ -139,7 +139,19 @@ export class ReportsService {
        LEFT JOIN order_items oi ON oi."orderId" = od.id
        WHERE ${whereSql}
        GROUP BY od.id, u."fullName", u.username, t.name, r.name
-       ORDER BY od."createdAt" DESC, od."orderCode" DESC`,
+       ORDER BY CASE od."orderState"::text
+          WHEN 'PAID' THEN 1
+          WHEN 'PARTIAL' THEN 2
+          WHEN 'UNPAID' THEN 3
+          ELSE 99
+        END ASC,
+        CASE
+          WHEN od."orderState"::text = 'PARTIAL' AND COALESCE(od."paidAmount", 0) > 0 THEN 0
+          WHEN od."orderState"::text = 'PARTIAL' THEN 1
+          ELSE 0
+        END ASC,
+        od."updatedAt" ASC,
+        od."orderCode" DESC`,
       params,
     );
 
@@ -245,10 +257,15 @@ export class ReportsService {
       search?: string;
       type?: 'SINGLE' | 'COMBO' | 'TIME';
       stockStatus?: 'all' | 'in_stock' | 'out_of_stock';
+      page?: number;
+      pageSize?: number;
     },
   ) {
     const branchId = this.branchPolicy.resolveReadBranchId(user, query.branchId);
-    if (!branchId) return { rows: [] };
+    if (!branchId) return { rows: [], pagination: { page: 1, pageSize: 100, total: 0, totalPages: 1 } };
+    const page = Math.max(1, Number(query.page) || 1);
+    const pageSize = Math.min(500, Math.max(20, Number(query.pageSize) || 100));
+    const offset = (page - 1) * pageSize;
 
     const range = this.buildRange(query.startDate, query.endDate);
     const effectiveStates = ['PAID', 'PARTIAL', 'UNPAID'];
@@ -281,6 +298,23 @@ export class ReportsService {
 
     const whereSql = where.join(' AND ');
 
+    const baseSql = `FROM order_items oi
+        JOIN orders od ON od.id = oi."orderId"
+        LEFT JOIN products p ON p.id = oi."productId"
+        LEFT JOIN categories c ON c.id = p."categoryId" AND c."deletedAt" IS NULL
+        WHERE ${whereSql}
+        GROUP BY oi."productId", p.name, p.unit, c.id, c.name, p."costPrice"`;
+
+    const totalRows = await this.db.query<{ total: string }>(
+      `SELECT COUNT(*)::text AS total
+       FROM (
+         SELECT oi."productId"
+         ${baseSql}
+       ) t`,
+      params,
+    );
+    const total = Math.max(0, Math.trunc(Number(totalRows[0]?.total || 0)));
+
     const rows = await this.db.query<{
       productId: string;
       productName: string;
@@ -293,14 +327,6 @@ export class ReportsService {
       discountAmount: string;
       surchargeAmount: string;
       netAmount: string;
-      orderDetails: Array<{
-        orderId: string;
-        orderCode: string;
-        createdAt: string;
-        quantity: number;
-        unitPrice: string;
-        lineTotal: string;
-      }>;
     }>(
       `SELECT
          oi."productId",
@@ -313,23 +339,11 @@ export class ReportsService {
          (SUM(oi."totalPrice") + SUM(oi."lineDiscountAmount") - SUM(oi."lineSurchargeAmount"))::text AS "grossAmount",
          SUM(oi."lineDiscountAmount")::text AS "discountAmount",
          SUM(oi."lineSurchargeAmount")::text AS "surchargeAmount",
-         SUM(oi."totalPrice")::text AS "netAmount",
-         json_agg(json_build_object(
-           'orderId', od.id,
-           'orderCode', od."orderCode",
-           'createdAt', od."createdAt",
-           'quantity', oi.quantity,
-           'unitPrice', oi."unitPrice"::text,
-           'lineTotal', oi."totalPrice"::text
-         ) ORDER BY od."createdAt" DESC) AS "orderDetails"
-       FROM order_items oi
-       JOIN orders od ON od.id = oi."orderId"
-       LEFT JOIN products p ON p.id = oi."productId"
-       LEFT JOIN categories c ON c.id = p."categoryId" AND c."deletedAt" IS NULL
-       WHERE ${whereSql}
-       GROUP BY oi."productId", p.name, p.unit, c.id, c.name, p."costPrice"
-       ORDER BY SUM(oi."totalPrice") DESC`,
-      params,
+         SUM(oi."totalPrice")::text AS "netAmount"
+       ${baseSql}
+       ORDER BY SUM(oi."totalPrice") DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset],
     );
 
     return {
@@ -351,16 +365,14 @@ export class ReportsService {
           surchargeAmount: this.toMoney(r.surchargeAmount),
           netAmount,
           grossProfit,
-          orderDetails: (r.orderDetails || []).map((o) => ({
-            orderId: o.orderId,
-            orderCode: o.orderCode,
-            createdAt: o.createdAt,
-            quantity: this.toMoney(o.quantity),
-            unitPrice: this.toMoney(o.unitPrice),
-            lineTotal: this.toMoney(o.lineTotal),
-          })),
         };
       }),
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
     };
   }
 }
